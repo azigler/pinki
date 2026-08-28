@@ -14,6 +14,7 @@
 //! overdue, `2099-01-01T00:00:00Z` for definitely not. The exact `now > until`
 //! boundary is unit-tested to the second in `src/state.rs`.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -60,17 +61,24 @@ impl Scratch {
     }
 
     fn run(&self, args: &[&str]) -> Run {
-        self.spawn(args, None)
+        self.spawn(args, None, self.ledger().into_os_string())
     }
 
     fn feed(&self, args: &[&str], stdin: &str) -> Run {
-        self.spawn(args, Some(stdin))
+        self.spawn(args, Some(stdin), self.ledger().into_os_string())
     }
 
-    fn spawn(&self, args: &[&str], stdin: Option<&str>) -> Run {
+    /// Run with `PINKI_LEDGER` set to a bare filename. The child already runs in the
+    /// scratch directory, so the ledger lands there — and there is no parent directory
+    /// for pinki to create.
+    fn run_with_bare_ledger(&self, name: &str, args: &[&str]) -> Run {
+        self.spawn(args, None, OsString::from(name))
+    }
+
+    fn spawn(&self, args: &[&str], stdin: Option<&str>, ledger: OsString) -> Run {
         let mut child = Command::new(BIN)
             .args(args)
-            .env("PINKI_LEDGER", self.ledger())
+            .env("PINKI_LEDGER", &ledger)
             .current_dir(&self.dir)
             .stdin(if stdin.is_some() {
                 Stdio::piped()
@@ -382,6 +390,83 @@ fn an_unknown_antecedent_warns_but_proceeds() {
     assert_eq!(scratch.lines().len(), 1);
 }
 
+#[test]
+fn an_explicit_id_is_recorded_instead_of_a_minted_one() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&[
+        "promise",
+        "send the draft schema",
+        "--by",
+        "author",
+        "--to",
+        "reviewer",
+        "--until",
+        FUTURE,
+        "--id",
+        "pnk_4f3a91",
+    ]);
+    run.expect(0);
+    assert_eq!(run.id(), "pnk_4f3a91");
+
+    let event: serde_json::Value = serde_json::from_str(&scratch.lines()[0]).expect("valid JSON");
+    assert_eq!(event["id"], "pnk_4f3a91");
+}
+
+#[test]
+fn an_explicit_id_that_is_not_well_formed_is_a_usage_error() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&[
+        "promise",
+        "send the draft schema",
+        "--by",
+        "author",
+        "--to",
+        "reviewer",
+        "--until",
+        FUTURE,
+        "--id",
+        "promise-1",
+    ]);
+    run.expect(2);
+    assert!(
+        run.stderr.contains("six lowercase hex digits"),
+        "the error should say what a pinki id looks like: {:?}",
+        run.stderr
+    );
+    assert!(scratch.lines().is_empty(), "nothing may be appended");
+}
+
+#[test]
+fn an_explicit_id_that_is_already_declared_is_refused() {
+    let scratch = Scratch::new();
+    let declare = |text: &str| {
+        scratch.run(&[
+            "promise",
+            text,
+            "--by",
+            "author",
+            "--to",
+            "reviewer",
+            "--until",
+            FUTURE,
+            "--id",
+            "pnk_4f3a91",
+        ])
+    };
+    declare("send the draft schema").expect(0);
+
+    // §4: ids are stable and the first declaration wins, so the second is refused
+    // rather than allowed to move the deadline out from under the first.
+    let run = declare("send a different schema");
+    run.expect(1);
+    assert!(
+        run.stderr.contains("already declared"),
+        "the error should say the id is spoken for: {:?}",
+        run.stderr
+    );
+    assert_eq!(scratch.lines().len(), 1, "the first declaration stands");
+}
+
 // ------------------------------------------------------------------ resolve
 
 #[test]
@@ -441,6 +526,79 @@ fn blank_evidence_leaves_the_ledger_untouched() {
         .run(&["resolve", &id, "--satisfied", "--evidence", "   "])
         .expect(2);
     assert_eq!(scratch.lines(), before);
+}
+
+#[test]
+fn a_reason_is_refused_with_satisfied_because_a_reason_is_not_evidence() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    let before = scratch.lines();
+
+    let run = scratch.run(&[
+        "resolve",
+        &id,
+        "--satisfied",
+        "--evidence",
+        "https://example.org/x",
+        "--reason",
+        "it went fine",
+    ]);
+    run.expect(2);
+    assert!(
+        run.stderr.contains("--reason is not accepted"),
+        "the error should name the rule: {:?}",
+        run.stderr
+    );
+    assert_eq!(scratch.lines(), before, "the ledger must be unchanged");
+}
+
+#[test]
+fn evidence_is_refused_with_released_because_releasing_claims_nothing_was_done() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    let before = scratch.lines();
+
+    let run = scratch.run(&[
+        "resolve",
+        &id,
+        "--released",
+        "--evidence",
+        "https://example.org/x",
+    ]);
+    run.expect(2);
+    assert!(
+        run.stderr.contains("--evidence is not accepted"),
+        "the error should name the rule: {:?}",
+        run.stderr
+    );
+    assert_eq!(scratch.lines(), before, "the ledger must be unchanged");
+}
+
+#[test]
+fn a_released_reason_is_recorded_when_one_is_given() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+
+    let run = scratch.run(&["resolve", &id, "--released", "--reason", "no longer needed"]);
+    run.expect(0);
+
+    let event: serde_json::Value = serde_json::from_str(&scratch.lines()[1]).expect("valid JSON");
+    assert_eq!(event["as"], "released");
+    assert_eq!(event["reason"], "no longer needed");
+}
+
+#[test]
+fn a_blank_released_reason_leaves_the_ledger_untouched() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    let before = scratch.lines();
+
+    // Whitespace is not a value: a reason offered and left empty is malformed input,
+    // not the same thing as declining to give one.
+    scratch
+        .run(&["resolve", &id, "--released", "--reason", "   "])
+        .expect(2);
+    assert_eq!(scratch.lines(), before, "the ledger must be unchanged");
 }
 
 #[test]
@@ -724,6 +882,43 @@ fn ls_human_output_is_plain_ascii_columns() {
     assert!(run.stdout.contains("detached"));
 }
 
+#[test]
+fn ls_on_an_empty_ledger_says_so_on_stderr() {
+    let scratch = Scratch::new();
+
+    let run = scratch.run(&["ls"]);
+    // Nobody having promised anything is a legitimate state, not an error — but
+    // silence would be ambiguous, so the note goes to stderr and stdout stays empty.
+    run.expect(0);
+    assert!(run.stdout.is_empty(), "no table for an empty ledger");
+    assert!(
+        run.stderr.contains("holds no promises"),
+        "the note should say the ledger is empty: {:?}",
+        run.stderr
+    );
+}
+
+#[test]
+fn ls_says_how_many_the_ledger_holds_when_a_filter_hides_everything() {
+    let scratch = Scratch::new();
+    scratch.promise("ship it", "author", "publisher", FUTURE);
+
+    let run = scratch.run(&["ls", "--by", "nobody"]);
+    run.expect(0);
+    assert!(run.stdout.is_empty(), "no table when nothing matched");
+    // An empty ledger and a filter that hid everything must not read alike.
+    assert!(
+        run.stderr.contains("no promises match"),
+        "the note should distinguish a filter from an empty ledger: {:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("the ledger holds 1"),
+        "the note should say how much was hidden: {:?}",
+        run.stderr
+    );
+}
+
 // -------------------------------------------------------------------- show
 
 #[test]
@@ -784,9 +979,351 @@ fn show_reports_no_resolution_as_null() {
 }
 
 #[test]
+fn show_json_reports_a_cancelled_resolution_with_its_reason() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--cancelled",
+            "--reason",
+            "upstream schema was withdrawn",
+        ])
+        .expect(0);
+
+    let run = scratch.run(&["show", &id, "--json"]);
+    run.expect(0);
+    let resolution = &run.json()["resolution"];
+    assert_eq!(resolution["as"], "cancelled");
+    assert_eq!(resolution["by"], "author");
+    assert_eq!(resolution["reason"], "upstream schema was withdrawn");
+    assert!(
+        resolution.get("evidence").is_none(),
+        "a cancelled promise was not done, so it points at nothing: {resolution}"
+    );
+}
+
+#[test]
+fn show_json_reports_a_released_resolution_with_its_reason() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    scratch
+        .run(&["resolve", &id, "--released", "--reason", "no longer needed"])
+        .expect(0);
+
+    let run = scratch.run(&["show", &id, "--json"]);
+    run.expect(0);
+    let resolution = &run.json()["resolution"];
+    assert_eq!(resolution["as"], "released");
+    // Releasing is the creditor's act (§4).
+    assert_eq!(resolution["by"], "reviewer");
+    assert_eq!(resolution["reason"], "no longer needed");
+    assert!(
+        resolution.get("evidence").is_none(),
+        "releasing is not a claim that the work was done: {resolution}"
+    );
+}
+
+#[test]
+fn show_json_omits_the_reason_a_release_did_not_give() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    scratch.run(&["resolve", &id, "--released"]).expect(0);
+
+    let run = scratch.run(&["show", &id, "--json"]);
+    run.expect(0);
+    let resolution = &run.json()["resolution"];
+    assert_eq!(resolution["as"], "released");
+    assert!(
+        resolution.get("reason").is_none(),
+        "a reason is encouraged, not required — an absent one is absent: {resolution}"
+    );
+}
+
+#[test]
+fn show_prints_a_plain_text_block_for_an_unresolved_promise() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+
+    let run = scratch.run(&["show", &id]);
+    run.expect(0);
+    assert!(
+        run.stdout.starts_with(&format!("{id}  detached\n")),
+        "the id and the computed state head the block: {:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("promise      send the draft schema\n"),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("by           author\n"),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("to           reviewer\n"),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains(&format!("until        {FUTURE}\n")),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("resolution   (unresolved)\n"),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("assessments  (none)\n"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn show_omits_the_antecedent_and_task_lines_when_the_record_has_neither() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+
+    let run = scratch.run(&["show", &id]);
+    run.expect(0);
+    assert!(
+        !run.stdout.contains("  on   "),
+        "an absent antecedent gets no line: {:?}",
+        run.stdout
+    );
+    assert!(
+        !run.stdout.contains("  task "),
+        "an absent task gets no line: {:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn show_prints_the_antecedent_and_the_task_when_the_record_has_them() {
+    let scratch = Scratch::new();
+    let a = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    let b_run = scratch.run(&[
+        "promise",
+        "hand back a review",
+        "--by",
+        "reviewer",
+        "--to",
+        "author",
+        "--until",
+        FUTURE,
+        "--on",
+        &a,
+        "--task",
+        "a2a-task-9c1f0e",
+    ]);
+    b_run.expect(0);
+
+    let run = scratch.run(&["show", &b_run.id()]);
+    run.expect(0);
+    assert!(
+        run.stdout.contains(&format!("on           {a}\n")),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("task         a2a-task-9c1f0e\n"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn show_prints_every_evidence_reference_under_the_resolution() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--satisfied",
+            "--evidence",
+            "https://example.org/schemas/draft-3.json",
+            "--evidence",
+            "sha:9c1f0e",
+        ])
+        .expect(0);
+
+    let run = scratch.run(&["show", &id]);
+    run.expect(0);
+    assert!(
+        run.stdout.contains("resolution   satisfied at "),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains(" by author\n"),
+        "the block names who claimed it: {:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("evidence   https://example.org/schemas/draft-3.json\n"),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains("evidence   sha:9c1f0e\n"),
+        "every reference gets its own line: {:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn show_prints_the_reason_a_promise_was_cancelled() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--cancelled",
+            "--reason",
+            "upstream schema was withdrawn",
+        ])
+        .expect(0);
+
+    let run = scratch.run(&["show", &id]);
+    run.expect(0);
+    assert!(
+        run.stdout.contains("resolution   cancelled at "),
+        "{:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("reason     upstream schema was withdrawn\n"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn show_lists_an_assessment_with_its_note() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship it", "author", "publisher", PAST);
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--violated",
+            "--observer",
+            "publisher",
+            "--note",
+            "nothing shipped, no reason given",
+        ])
+        .expect(0);
+
+    let run = scratch.run(&["show", &id]);
+    run.expect(0);
+    assert!(
+        run.stdout.contains("assessments\n"),
+        "the heading replaces the (none) line: {:?}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("violated  publisher  nothing shipped, no reason given\n"),
+        "{:?}",
+        run.stdout
+    );
+}
+
+#[test]
+fn show_lists_an_assessment_that_carries_no_note() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship it", "author", "publisher", PAST);
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "publisher"])
+        .expect(0);
+
+    let run = scratch.run(&["show", &id]);
+    run.expect(0);
+    assert!(
+        run.stdout.contains("violated  publisher\n"),
+        "an absent note leaves the line ending at the observer: {:?}",
+        run.stdout
+    );
+}
+
+#[test]
 fn showing_an_unknown_id_fails_operationally() {
     let scratch = Scratch::new();
     scratch.run(&["show", "pnk_000000"]).expect(1);
+}
+
+#[test]
+fn showing_an_id_that_is_not_even_well_formed_says_so() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&["show", "bogus"]);
+    run.expect(1);
+    assert!(
+        run.stderr.contains("not even a well-formed pinki id"),
+        "an id that could never have been minted earns a hint: {:?}",
+        run.stderr
+    );
+}
+
+// ------------------------------------------------------------ the ledger file
+
+#[test]
+fn a_ledger_path_that_is_a_directory_fails_operationally() {
+    let scratch = Scratch::new();
+    // Not "missing" — an absent ledger is an empty one. This is a path that exists
+    // and cannot be read, which is a real failure and must say so.
+    fs::create_dir_all(scratch.ledger()).expect("a directory where the ledger should be");
+
+    let run = scratch.run(&["ls"]);
+    run.expect(1);
+    assert!(
+        run.stderr.contains("ledger.jsonl"),
+        "the error should name the file it could not read: {:?}",
+        run.stderr
+    );
+    assert!(run.stdout.is_empty(), "errors never go to stdout");
+}
+
+#[test]
+fn a_bare_ledger_filename_lands_beside_the_working_directory() {
+    let scratch = Scratch::new();
+
+    // `PINKI_LEDGER=ledger.jsonl` names a file with no directory component. There is
+    // no parent to create, and pinki must not invent one.
+    let run = scratch.run_with_bare_ledger(
+        "ledger.jsonl",
+        &[
+            "promise",
+            "ship it",
+            "--by",
+            "author",
+            "--to",
+            "publisher",
+            "--until",
+            FUTURE,
+        ],
+    );
+    run.expect(0);
+
+    let written = scratch.dir.join("ledger.jsonl");
+    assert!(
+        written.exists(),
+        "the ledger should be {}",
+        written.display()
+    );
+    assert!(
+        !scratch.dir.join(".pinki").exists(),
+        "no directory should have been created"
+    );
 }
 
 // ---------------------------------------------------------------- the graph
@@ -910,3 +1447,47 @@ fn a2a_task_for_an_unknown_id_fails_operationally() {
     run.expect(1);
     assert!(run.stdout.is_empty(), "no half-written JSON on failure");
 }
+
+// ------------------------------------------------------------ what stays uncovered
+//
+// `cargo llvm-cov --summary-only --show-missing-lines` names ten source lines that no
+// test executes. Each is listed here with the reason, because an unexplained gap and a
+// deliberate one look identical in a coverage report — and the deliberate ones should
+// stay deliberate rather than be closed by a test that asserts nothing.
+//
+// Unreachable defensive code — the arm exists so the fold cannot panic on a ledger
+// somebody else wrote, and the surrounding code makes it unconstructible:
+//
+//   src/state.rs 206   `_ => State::Conditional` when a declared id has no memo entry.
+//                      Every id in `order` is solved before this runs, and `solve`
+//                      only ever terminates with `Memo::Done`.
+//   src/state.rs 257-259  the dangling arm in `solve`, for an id with no record.
+//                      `solve` is called only for ids in `records`, and an antecedent
+//                      is `contains_key`-checked before it is pushed on the stack, so
+//                      `self.records.get(current)` is always `Some`.
+//   src/state.rs 270   `None => State::Detached` for a resolution that is not one.
+//                      Only `EventBody::Resolve` events enter `resolutions`, and
+//                      `Event::resolution()` returns `Some` for exactly those.
+//   src/verbs.rs 591   `_ => None` over `view.assessments`, which `fold` fills only
+//                      from `EventBody::Assess` events.
+//
+// Unreachable from a test harness:
+//
+//   src/verbs.rs 221   the `io::stdin().is_terminal()` refusal. A child spawned by a
+//                      test never has a tty on stdin, and giving it one would mean a
+//                      pty dependency — which Cargo.toml exists to refuse. Exercised
+//                      by hand: `pinki promise` at a prompt.
+//
+// Test-internal — the failure arm of an assertion, which by construction does not run
+// while the suite is green:
+//
+//   src/event.rs 344      `panic!` in `every_event_type_round_trips`.
+//   src/ledger.rs 279,292 `other => panic!("expected Malformed, …")`.
+//
+// One more thing a reader should not have to rediscover: the summary's "Missed Lines"
+// column is larger than this list (34 against 10). The difference is not a set of
+// hidden gaps — no source line accounts for it. pinki is built twice under coverage,
+// once as the binary the tests here drive and once as the unit-test harness, and a
+// function present in both but exercised in only one is billed as missed lines against
+// the copy that never ran it. `--show-missing-lines` and the annotated `--text` report
+// both merge the two and agree on the ten lines above.
