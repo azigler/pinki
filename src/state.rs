@@ -623,6 +623,15 @@ mod tests {
     }
 
     #[test]
+    fn a_state_formats_as_the_word_it_prints() {
+        // `Display` and `as_str` are the same vocabulary; a state interpolated into a
+        // message must not read as its Rust variant name.
+        assert_eq!(format!("{}", State::Overdue), "overdue");
+        assert_eq!(format!("{}", State::Conditional), "conditional");
+        assert_eq!(format!("{}", State::Expired), "expired");
+    }
+
+    #[test]
     fn resolving_after_the_deadline_still_yields_satisfied() {
         // Late, but done. `overdue` was a fact about an unresolved promise; the
         // resolve ends it, and whether the lateness mattered is an `assess`, not

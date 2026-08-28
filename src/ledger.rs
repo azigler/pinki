@@ -294,6 +294,107 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_that_is_already_a_file_is_an_io_error_naming_it() {
+        let scratch = Scratch::new("parentfile");
+        let blocker = scratch.join("blocker");
+        fs::write(&blocker, "").unwrap();
+
+        // `.pinki/` cannot be created under something that is not a directory.
+        let err =
+            append_at(&blocker.join("ledger.jsonl"), &promise_event("pnk_000001")).unwrap_err();
+        assert!(err.to_string().contains("blocker"), "{err}");
+        assert!(
+            matches!(&err, Error::Io { path, .. } if path == &blocker),
+            "the error should name the directory it could not create: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_ledger_path_that_is_a_directory_cannot_be_opened_for_append() {
+        let scratch = Scratch::new("appenddir");
+        let path = scratch.join("ledger.jsonl");
+        fs::create_dir_all(&path).unwrap();
+
+        let err = append_at(&path, &promise_event("pnk_000001")).unwrap_err();
+        assert!(err.to_string().contains("ledger.jsonl"), "{err}");
+        assert!(matches!(err, Error::Io { .. }), "{err:?}");
+    }
+
+    /// `/dev/full` accepts the open and refuses the bytes, which is the only way to
+    /// reach a failing write without filling a real disk. Linux-only because the
+    /// device is: elsewhere there is nothing to ask.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_write_that_cannot_land_is_an_io_error() {
+        let err = append_at(Path::new("/dev/full"), &promise_event("pnk_000001")).unwrap_err();
+        assert!(err.to_string().contains("/dev/full"), "{err}");
+        assert!(matches!(err, Error::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_ledger_path_with_no_parent_creates_no_directory() {
+        // A path with no parent at all. Nothing to create, so append goes straight to
+        // the open — which `/` refuses, proving the directory step was skipped.
+        let err = append_at(Path::new("/"), &promise_event("pnk_000001")).unwrap_err();
+        assert!(matches!(err, Error::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_io_error_names_the_path_it_was_touching() {
+        let err = Error::Io {
+            path: PathBuf::from("/tmp/ledger.jsonl"),
+            source: std::io::Error::new(ErrorKind::PermissionDenied, "denied"),
+        };
+        assert_eq!(err.to_string(), "ledger /tmp/ledger.jsonl: denied");
+    }
+
+    #[test]
+    fn an_encode_error_says_the_event_could_not_be_encoded() {
+        let err = Error::Encode {
+            source: not_an_event(),
+        };
+        assert!(
+            err.to_string()
+                .starts_with("could not encode event as JSON: "),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn every_error_variant_hands_back_its_source() {
+        use std::error::Error as _;
+
+        let io = Error::Io {
+            path: PathBuf::from("/tmp/ledger.jsonl"),
+            source: std::io::Error::new(ErrorKind::PermissionDenied, "denied"),
+        };
+        let malformed = Error::Malformed {
+            path: PathBuf::from("/tmp/ledger.jsonl"),
+            line: 2,
+            source: not_an_event(),
+        };
+        let encode = Error::Encode {
+            source: not_an_event(),
+        };
+
+        assert!(io.source().is_some(), "an Io error keeps the io::Error");
+        assert!(
+            malformed.source().is_some(),
+            "a Malformed error keeps the parse failure"
+        );
+        assert!(
+            encode.source().is_some(),
+            "an Encode error keeps the serde failure"
+        );
+    }
+
+    /// A `serde_json::Error`, for the variants that carry one. There is no constructor
+    /// for these, so one is made the only way it can be: by failing a parse.
+    fn not_an_event() -> serde_json::Error {
+        serde_json::from_str::<Event>("{}").unwrap_err()
+    }
+
+    #[test]
     fn a_json_line_that_is_not_a_pinki_event_is_also_malformed() {
         let scratch = Scratch::new("notevent");
         let path = scratch.join("ledger.jsonl");
