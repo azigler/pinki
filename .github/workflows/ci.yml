@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test, coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      # Coverage runs the suite again under instrumentation. The summary is written
+      # before the gate so a failing gate still reports the number it failed on.
+      - name: Coverage
+        run: |
+          cargo llvm-cov --summary-only | tee coverage.txt
+          {
+            echo '### Coverage'
+            echo ''
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The bar is the coverage actually achieved at v0.1.0 (97.99% lines), rounded
+      # down to the whole point. Raise it when the real number clears the next point;
+      # never lower it to make a red build green.
+      - name: Coverage gate (>= 97% lines)
+        run: cargo llvm-cov report --fail-under-lines 97

@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package
+        run: |
+          tar -czf "pinki-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" \
+            -C target/x86_64-unknown-linux-gnu/release pinki
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: pinki-*-x86_64-unknown-linux-gnu.tar.gz
+          generate_release_notes: true
