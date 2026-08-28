@@ -70,6 +70,22 @@ An implementation of the vocabulary in another language, or as a library rather 
 a CLI, is a very welcome thing and does not need to live in this repo. Tell us and
 we will link it.
 
+## How this repo is maintained
+
+Honestly: this project will likely have one maintainer (plus their agent fleet) for
+the foreseeable future, and that is the operating model, not a gap. It is the same
+way Jeffrey Emmanuel runs [beads_rust](https://github.com/Dicklesworthstone/beads_rust),
+and it works: **issues are the contribution surface.** You post an argument, a
+report, or a feature request; we evaluate it in the open, accept or decline with
+reasons, and close as we go. Accepted ideas become maintainer PRs — implemented
+against the CI gates (tests, clippy, the coverage bar), merged, and released as a
+minor version with a CHANGELOG entry citing the issue that started it.
+
+So an issue here is not a message into a void; it is the actual mechanism by which
+this project moves. Outside PRs aren't forbidden — see the mechanics below — but if
+you just want the thing fixed or the idea considered, the issue alone is a complete
+contribution, and usually the faster path.
+
 ## Where design happens
 
 In [GitHub issues](https://github.com/azigler/pinki/issues), in public, in writing.
