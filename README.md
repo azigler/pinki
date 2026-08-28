@@ -3,10 +3,15 @@
 > A tiny promise ledger for agent fleets, shipped as an [A2A](https://a2a-protocol.org)
 > extension.
 
-**Status: pre-alpha. The design is public; the code is not written yet.** This repo is
-being built in the open as part of a written deep-dive on agent obligations. Nothing
-here is stable, and the most useful thing you can send today is an argument — see
-[CONTRIBUTING.md](CONTRIBUTING.md).
+<!-- Uncomment once the first Actions run has completed on main:
+[![CI](https://github.com/azigler/pinki/actions/workflows/ci.yml/badge.svg)](https://github.com/azigler/pinki/actions/workflows/ci.yml)
+-->
+
+**Status: v0.1.0, pre-alpha. The design is public and the CLI runs; nothing is
+stable.** This repo is being built in the open as part of a written deep-dive on agent
+obligations. Minor versions carry the work as it lands, and 1.0 is reserved for done —
+see [CHANGELOG.md](CHANGELOG.md). The most useful thing you can send today is still an
+argument: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## The problem
 
@@ -90,6 +95,31 @@ Three layers, separately adoptable:
 You can take the first layer and build your own tooling. You can take the first two
 and interoperate over A2A without ever running pinki. That's the point — pinki is
 meant to be a nucleus you build on top of, not a framework you adopt.
+
+## Install
+
+Build it from source. There is nothing else to install — no daemon, no server, no
+database.
+
+```sh
+cargo build --release
+```
+
+The binary lands at `target/release/pinki`. Put it on your `PATH` and it will create
+its ledger on first use:
+
+```sh
+./target/release/pinki promise "hand back a reviewed schema" \
+  --by  https://example.org/agents/reviewer \
+  --to  https://example.org/agents/author \
+  --until 2026-09-01T17:00:00Z
+```
+
+The ledger is a JSONL file at `$PINKI_LEDGER`, defaulting to `./.pinki/ledger.jsonl`.
+Copy that file and you have copied the state.
+
+**MSRV: Rust 1.97.1** — the stable toolchain this is built and tested against. Earlier
+versions may work; none are tested, so none are claimed.
 
 ## Prior art
 
