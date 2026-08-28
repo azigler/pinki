@@ -1,0 +1,45 @@
+name: "Design proposal"
+description: Propose a change, or answer one of the open questions.
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you write this: pinki is trying to stay a nucleus. Additions are held
+        to a high bar, and most good ideas belong in the layer above rather than in
+        pinki itself — that is the project working, not a rejection.
+        See [docs/DESIGN.md § 6](https://github.com/azigler/pinki/blob/main/docs/DESIGN.md#6-what-pinki-is-not).
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem it solves
+      description: A concrete situation where the current design fails you.
+    validations:
+      required: true
+  - type: dropdown
+    id: shape
+    attributes:
+      label: Shape of the change
+      description: Changes that remove or clarify are much easier to land than changes that add.
+      options:
+        - Removes something
+        - Clarifies something ambiguous
+        - Corrects a factual error
+        - Adds a field, verb, state, or option
+    validations:
+      required: true
+  - type: textarea
+    id: layer-above
+    attributes:
+      label: Why this can't live in the layer above
+      description: >
+        Required for anything that adds. If an orchestrator built on top of pinki
+        could do this instead, say why it shouldn't.
+    validations:
+      required: false

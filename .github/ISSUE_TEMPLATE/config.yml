@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Read the design first
+    url: https://github.com/azigler/pinki/blob/main/docs/DESIGN.md
+    about: The nucleus, the state machine, the non-goals, and the open questions. Most feature requests are answered in section 6.
+  - name: A2A protocol
+    url: https://a2a-protocol.org
+    about: Questions about A2A itself belong upstream, not here.

@@ -1,36 +1,119 @@
 # pinki 🤙
 
-> A tiny promise broker for agent fleets, built on [A2A](https://a2a-protocol.org).
+> A tiny promise ledger for agent fleets, shipped as an [A2A](https://a2a-protocol.org)
+> extension.
 
-**Status: pre-alpha — design in the open.** This repo is being bootstrapped as part
-of a written deep-dive on agent obligations (coming soon). Nothing here is stable yet.
+**Status: pre-alpha. The design is public; the code is not written yet.** This repo is
+being built in the open as part of a written deep-dive on agent obligations. Nothing
+here is stable, and the most useful thing you can send today is an argument — see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-## The idea
+## The problem
 
-Agents with durable identities make **promises** — commitments that outlive the
-session that made them. A promise carries:
+Give agents durable identities and they start depending on each other. One waits on
+another's output; a third can't start until the second finishes. Once that happens,
+things get dropped in the gaps between sessions — and nothing in the stack records
+that anything *was* owed.
 
-- a **deadline**, so a lapse is computable
-- **evidence** at resolution, so "done" points at an artifact
-- a **reason** at abandonment, so dropping it is a recorded act
+A2A gives agents identity and a way to talk. It has no way to say **"I will, by
+when, and here's what will prove it."** There is no deadline field anywhere in the
+protocol; `TaskStatus.timestamp` records when a status happened, never when anything
+is due. That gap is [issue #857](https://github.com/a2aproject/A2A/issues/857), open
+since July 2025.
 
-A2A's AgentCard gives agent identity a durable, signed home, and its extension
-system gives typed metadata a place to ride. What's missing everywhere: when an
-observer detects a lapse, that verdict lands on a second ledger — and nothing in
-any protocol names who reconciles the two. pinki is that missing third party: a
-**loose promise broker** that holds the join.
+pinki fills it with one record.
 
-Planned shape: deliberately small — likely a CLI over an append-only JSONL ledger,
-speaking A2A-shaped records. Design notes, prior-art research, and the first cut
-land here as they happen.
+```json
+{
+  "id":      "pnk_4f3a91",
+  "promise": "hand back a reviewed schema",
+  "by":      "https://example.org/agents/reviewer",
+  "to":      "https://example.org/agents/author",
+  "on":      "pnk_0c2b77",
+  "until":   "2026-09-01T17:00:00Z"
+}
+```
+
+A **debtor** owes a **creditor** a thing, by a **deadline**. Satisfying it requires
+evidence. Abandoning it requires a reason. And `on` points at another promise, which
+is the interesting part:
+
+> **A task graph's edges are ordering. A promise graph's edges are obligation between
+> named parties.**
+
+A task DAG tells you what has to happen before what. A promise graph tells you who
+owes what to whom — and therefore who is left holding something when a node goes
+quiet. The shape of a project versus the shape of a collaboration.
+
+## What pinki will not do
+
+It will not tell you a promise was broken.
+
+It can't. Whether a promise was kept is a judgment — it depends on what counts as
+done, on context the record doesn't carry, and on who's asking. Mark Burgess's
+[Promise Theory](http://markburgess.org/PromiseMethod.pdf) is blunt about this:
+assessment is made by an agent, from that agent's vantage, and is subjective no
+matter which agent makes it. A third party that appoints itself judge has mostly
+acquired the ability to distort the thing it claims to certify.
+
+So pinki draws a hard line down the middle of its own state machine:
+
+- **`overdue` is arithmetic.** `now > until` and unresolved. Every implementation
+  computes the same answer. pinki will tell you this.
+- **`violated` is a speech act.** Somebody says it, signs it, and timestamps it.
+  pinki will *publish* it, attributed, next to the promise — and never compute it.
+
+Two observers can publish contradicting assessments of the same promise. pinki shows
+you both, because that is the actual state of the world and hiding it would be a lie.
+
+It is also not a scheduler, an agent registry, an SLO engine, a dashboard, or an
+escrow. Each of those has a reason attached in
+[DESIGN.md § 6](docs/DESIGN.md#6-what-pinki-is-not).
+
+## Shape
+
+Three layers, separately adoptable:
+
+1. **A vocabulary** — the record above, and a state machine borrowed from 25 years of
+   [commitment](docs/DESIGN.md#3-the-states) research rather than invented fresh.
+2. **An A2A binding** — using only the three surfaces A2A sanctions for extensions:
+   the AgentCard declaration, the `A2A-Extensions` header, and URI-prefixed
+   `metadata` keys. No new task states, no new roles.
+   → [docs/A2A-EXTENSION.md](docs/A2A-EXTENSION.md)
+3. **A CLI over an append-only JSONL log** — six verbs, no daemon, no server, no
+   database, and **no network calls at all**. It writes JSON to stdout and you pipe
+   it into the A2A client you already run.
+
+You can take the first layer and build your own tooling. You can take the first two
+and interoperate over A2A without ever running pinki. That's the point — pinki is
+meant to be a nucleus you build on top of, not a framework you adopt.
+
+## Docs
+
+- **[docs/DESIGN.md](docs/DESIGN.md)** — the nucleus: record, graph, states, log, CLI,
+  non-goals, and the honest limits.
+- **[docs/A2A-EXTENSION.md](docs/A2A-EXTENSION.md)** — the extension spec, checked
+  against `a2a.proto`.
+- **[docs/PRIOR-ART.md](docs/PRIOR-ART.md)** — what already exists, who got here
+  first, and what's actually new.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — what would help most right now.
 
 ## Contributing
 
-Contributor guidelines, a community guide, and the first issues arrive with the
-initial design (days, not months). Watch the repo if this scratches an itch you
-have — and if you've built something shaped like this, or know exactly why it
-can't work, open an issue: that's precisely the conversation this repo is for.
+The design has already been corrected once by outside research — an earlier draft
+called this a broker that detects lapses, which overclaimed on both counts. Expect
+that to keep happening.
+
+If you've built something shaped like this, or you can see exactly where it breaks,
+[open an issue](https://github.com/azigler/pinki/issues/new/choose). That is precisely
+the conversation this repo exists for.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+*pinki is an independent experiment. It builds on [A2A](https://a2a-protocol.org), a
+hosted project of the [Agentic AI Foundation](https://aaif.io); it is not affiliated
+with, endorsed by, or speaking for either.*

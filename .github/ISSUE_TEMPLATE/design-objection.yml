@@ -1,0 +1,46 @@
+name: "This can't work"
+description: You think the design is wrong. This is the most useful issue you can open.
+labels: ["objection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you — genuinely. The design has already been corrected once by an
+        outside argument, and it will be again. Be as blunt as you like.
+  - type: textarea
+    id: claim
+    attributes:
+      label: What is wrong
+      description: State the objection in a sentence or two before you explain it.
+      placeholder: "Evidence-on-satisfaction doesn't survive contact with X, because…"
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: >
+        The reasoning. Concrete beats general — a scenario, a scale, a failure you
+        have actually watched happen.
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: Where this comes from
+      description: >
+        Optional, but it helps us weigh it. Have you run something like this? Read
+        something that settles it? Is this a hunch? A hunch is fine — say so.
+    validations:
+      required: false
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer
+      options:
+        - The vocabulary (the record, the states, the semantics)
+        - The A2A binding
+        - The CLI / reference implementation
+        - The whole premise
+    validations:
+      required: true

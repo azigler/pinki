@@ -1,0 +1,31 @@
+name: "I built something shaped like this"
+description: Point at prior art, yours or someone else's.
+labels: ["prior-art"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This design leans hard on work that already exists. If we have missed
+        something — or reinvented it worse — we want to know.
+  - type: input
+    id: link
+    attributes:
+      label: Link
+      description: Repo, paper, product, or post.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What it does, and how it overlaps
+    validations:
+      required: true
+  - type: textarea
+    id: learned
+    attributes:
+      label: What you would do differently
+      description: >
+        The most valuable part. If you built it: what broke, what you would not do
+        again, what you would keep.
+    validations:
+      required: false
