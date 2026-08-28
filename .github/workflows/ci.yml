@@ -37,12 +37,12 @@ jobs:
       # before the gate so a failing gate still reports the number it failed on.
       - name: Coverage
         run: |
-          cargo llvm-cov --summary-only | tee coverage.txt
+          cargo llvm-cov --summary-only | tee "$RUNNER_TEMP/coverage.txt"
           {
             echo '### Coverage'
             echo ''
             echo '```'
-            cat coverage.txt
+            cat "$RUNNER_TEMP/coverage.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
