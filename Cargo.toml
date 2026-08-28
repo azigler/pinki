@@ -1,0 +1,31 @@
+[package]
+name = "pinki"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "A tiny promise broker: an append-only log of obligations between named agents."
+
+[[bin]]
+name = "pinki"
+path = "src/main.rs"
+
+# The dependency list below IS the enforcement of DESIGN.md §7's invariant:
+#
+#     "pinki makes no network calls."
+#
+# Nothing listed here can open a socket. clap parses argv, serde and serde_json move
+# structs to and from JSON text, and jiff (default features off) does timestamp
+# arithmetic. There is no HTTP client, no async runtime, no TLS stack, no DNS
+# resolver, and no transitive path to one. The invariant is therefore structural — a
+# property of what this binary is linked against — rather than a promise of good
+# behavior by the code above it. A tool that cannot carry a message cannot distort
+# one.
+#
+# Adding a dependency that CAN reach the network breaks §7 even if no call is ever
+# written. Audit the tree (`cargo tree`), not just the source.
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
