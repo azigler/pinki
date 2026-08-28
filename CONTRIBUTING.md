@@ -17,6 +17,15 @@ thing you can send is not a pull request. It is an argument.
    agents that `docs/DESIGN.md` cannot express is a bug report against the design.
 5. Code — once the design settles. See below.
 
+The first three have issue forms — [**"This can't work"**][f1], [**"I built
+something shaped like this"**][f2], and [**"Design proposal"**][f3]. They exist to
+make the argument easy to write, not to make it formal. If none of them fit, open a
+blank issue; those are enabled on purpose.
+
+[f1]: https://github.com/azigler/pinki/issues/new?template=design-objection.yml
+[f2]: https://github.com/azigler/pinki/issues/new?template=prior-art.yml
+[f3]: https://github.com/azigler/pinki/issues/new?template=proposal.yml
+
 ## The bar for anything new
 
 pinki is trying to be a nucleus: small enough that people build *on top of* it
@@ -61,6 +70,16 @@ An implementation of the vocabulary in another language, or as a library rather 
 a CLI, is a very welcome thing and does not need to live in this repo. Tell us and
 we will link it.
 
+## Where design happens
+
+In [GitHub issues](https://github.com/azigler/pinki/issues), in public, in writing.
+
+There is no chat server, no mailing list, and no Discussions tab. That is not a
+position on chat — it is that a design this small should leave a record someone can
+read a year from now without having been in the room. If a conversation starts
+somewhere else and reaches a conclusion, the conclusion belongs in an issue, and the
+issue belongs in `docs/DESIGN.md` once it settles.
+
 ## Issues before pull requests
 
 While the design is moving, please **open an issue before writing code**. A PR
@@ -88,6 +107,8 @@ and anything in the "removes something" category.
 ## Pull request mechanics
 
 - One idea per PR. Small is easier to say yes to.
+- **Commits: no convention.** Write a subject line a stranger could read. Don't
+  spend time curating history — the diff and your reasoning are what get reviewed.
 - Update `docs/DESIGN.md` in the same PR if you change behavior. The doc is the
   spec; if they disagree, the doc wins and the code is the bug.
 - Explain *why* in the description, not just *what*. The diff shows the what.
