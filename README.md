@@ -3,9 +3,7 @@
 > A tiny promise ledger for agent fleets, shipped as an [A2A](https://a2a-protocol.org)
 > extension.
 
-<!-- Uncomment once the first Actions run has completed on main:
 [![CI](https://github.com/azigler/pinki/actions/workflows/ci.yml/badge.svg)](https://github.com/azigler/pinki/actions/workflows/ci.yml)
--->
 
 **Status: v0.1.0, pre-alpha. The design is public and the CLI runs; nothing is
 stable.** This repo is being built in the open as part of a written deep-dive on agent
