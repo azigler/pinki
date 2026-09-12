@@ -1,4 +1,4 @@
-//! The argument surface — DESIGN.md §5's six verbs, and nothing else.
+//! The argument surface — DESIGN.md §5's seven verbs, and nothing else.
 //!
 //! This module only *describes* the command line. Everything it accepts is then
 //! validated by [`crate::verbs`], because several of §5's rules are ours to state in
@@ -30,6 +30,8 @@ pub struct Cli {
 pub enum Command {
     /// Speak a promise into existence. With no TEXT, reads one record as JSON on stdin.
     Promise(PromiseArgs),
+    /// Move a promise's deadline. The debtor's own act; every prior horizon is kept.
+    Amend(AmendArgs),
     /// End a promise: satisfied (with evidence), cancelled (with a reason), or released.
     Resolve(ResolveArgs),
     /// Publish an assessment of a promise. Never terminal — the promise stays as open as it was.
@@ -73,6 +75,26 @@ pub struct PromiseArgs {
     /// Use this id instead of minting one.
     #[arg(long, value_name = "ID")]
     pub id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AmendArgs {
+    /// The promise whose deadline is moving.
+    pub id: String,
+
+    /// The new deadline, as an ISO-8601 instant with an offset (e.g. 2026-09-01T17:30Z).
+    /// It may be earlier than the current one: deadlines move both ways.
+    #[arg(long, required = true, value_name = "ISO")]
+    pub until: String,
+
+    /// Why the deadline moved. Encouraged, not required.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+
+    /// Who is moving it. Defaults to the debtor, and §8.2 admits nobody else — an
+    /// observer's view of a deadline is an `assess`, not an amend.
+    #[arg(long, value_name = "WHO")]
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Args)]

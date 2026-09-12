@@ -11,6 +11,49 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Added
+
+- **The `amend` event, and the `amend` verb** — a deadline that moves, without a
+  silent move and without a phantom record per move. `pinki amend <ID> --until ISO
+  [--reason TEXT] [--by WHO]` appends `{"type":"amend","promise":…,"by":…,"until":…}`
+  beside the declaration; the fold takes the latest amend's `until` as the current
+  horizon and keeps every earlier one, which `show` lists in order (text and
+  `--json`'s `horizons`). `ls`, `show` and the A2A `metadata` block all carry the
+  horizon as it stands, so an outside observer computes the same `overdue` as the
+  fleet that owns the promise. Closes
+  [#9](https://github.com/azigler/pinki/issues/9), which arrived with the
+  measurement that motivates it: an escalation ladder re-declaring the same id had an
+  observer scoring a live promise overdue 32 minutes before its owner did.
+- **DESIGN.md § 8's second open question is settled** — the `amend` event, not
+  re-declaration and not supersede-with-lineage, with the reasoning and the rejected
+  alternatives recorded in place (§ 4 and § 8.2).
+
+### Changed
+
+- **The deadline in `ls`, `show` and `a2a task` is the current one**, not the
+  declared one, once a promise has been amended. The declaration itself is never
+  rewritten — `first declaration wins` is unchanged, and a reader that does not know
+  the `amend` type folds exactly the v0.1.0 answer rather than a broken one.
+
+### Refused, on purpose
+
+- **Only the debtor may amend** (§ 8.2). An amend naming anyone else is refused with
+  the rule cited and nothing appended; an observer who thinks a deadline should move
+  is making an assessment, which is a different speech act with its own verb. Like
+  every other rule here this is enforced where input arrives, never in the fold —
+  pinki authenticates nobody, and a joined ledger may carry an amend written by
+  something looser.
+- **A resolved promise cannot be amended.** The first resolve wins and ends it; there
+  is no horizon left to move.
+
+### Testing
+
+- **155 tests** — 94 unit, 61 driving the real binary — at **98.32% line coverage**,
+  including the three-step escalation ladder from #9 end to end and the proof that a
+  fold which skips `amend` events still answers exactly what v0.1.0 answered. The ten
+  deliberately uncovered lines at the end of `tests/cli.rs` are unchanged; their line
+  numbers moved.
+
 ## [0.1.0] - 2026-08-28
 
 The nucleus: enough of pinki to actually use, and enough tests to believe it.

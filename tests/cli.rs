@@ -467,6 +467,264 @@ fn an_explicit_id_that_is_already_declared_is_refused() {
     assert_eq!(scratch.lines().len(), 1, "the first declaration stands");
 }
 
+// -------------------------------------------------------------------- amend
+
+/// Fifteen minutes past `PAST`, so a nudge that lands here is still late.
+const PAST_PLUS_15: &str = "2020-01-01T00:15:00Z";
+
+/// The escalation ladder from issue #9, end to end.
+///
+/// A watchdog re-declares the *same* promise on a short clock when it lapses — minting
+/// a new id per nudge was considered and rejected, because it leaves a phantom promise
+/// behind for every rung. v0.1.0 refused that outright (first declaration wins), so the
+/// ladder is what `amend` exists for, and this is its acceptance case:
+///
+/// ```text
+/// declare  until = T
+/// amend    until = T + 15m     (nudge 1, same id)
+/// amend    until = T + 30m     (nudge 2, same id)
+/// resolve
+/// ```
+#[test]
+fn the_escalation_ladder_nudges_one_promise_twice() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    assert_eq!(state_of(&scratch, &id), "overdue");
+
+    // Nudge 1. The horizon moves and the state is recomputed against it — still late,
+    // because this rung is still in the past.
+    let first = scratch.run(&["amend", &id, "--until", PAST_PLUS_15, "--reason", "nudge 1"]);
+    first.expect(0);
+    assert_eq!(first.state(), "overdue");
+
+    // Nudge 2, onto a horizon that has not passed: the state follows the deadline.
+    let second = scratch.run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 2"]);
+    second.expect(0);
+    assert_eq!(second.state(), "detached");
+
+    // `ls` reports the current horizon, and the state computed against it.
+    let rows = scratch.run(&["ls", "--json"]);
+    rows.expect(0);
+    let listed = rows.json();
+    let row = &listed.as_array().expect("an array")[0];
+    assert_eq!(row["id"], id.as_str());
+    assert_eq!(row["until"], FUTURE, "ls shows the horizon as it stands");
+    assert_eq!(row["state"], "detached");
+
+    // Nothing was rewritten: one declaration, two amends, and the declaration still
+    // says exactly what it said.
+    let lines = scratch.lines();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    let declaration: serde_json::Value = serde_json::from_str(&lines[0]).expect("valid JSON");
+    assert_eq!(declaration["type"], "promise");
+    assert_eq!(declaration["until"], PAST);
+
+    let nudge: serde_json::Value = serde_json::from_str(&lines[1]).expect("valid JSON");
+    assert_eq!(nudge["type"], "amend");
+    assert_eq!(nudge["promise"], id.as_str());
+    // §8.2: the debtor's own act, and the default actor.
+    assert_eq!(nudge["by"], "watchdog");
+    assert_eq!(nudge["until"], PAST_PLUS_15);
+    assert_eq!(nudge["reason"], "nudge 1");
+
+    // `show` lists every horizon it has ever had, in order.
+    let detail = scratch.run(&["show", &id, "--json"]);
+    detail.expect(0);
+    let json = detail.json();
+    assert_eq!(json["until"], FUTURE);
+    let horizons = json["horizons"].as_array().expect("horizons");
+    assert_eq!(horizons.len(), 3, "{horizons:?}");
+    assert_eq!(horizons[0]["until"], PAST);
+    assert!(
+        horizons[0].get("reason").is_none(),
+        "the declaration needs no excuse: {}",
+        horizons[0]
+    );
+    assert_eq!(horizons[1]["until"], PAST_PLUS_15);
+    assert_eq!(horizons[1]["reason"], "nudge 1");
+    assert_eq!(horizons[2]["until"], FUTURE);
+    assert_eq!(horizons[2]["reason"], "nudge 2");
+    for horizon in horizons {
+        assert_eq!(horizon["by"], "watchdog");
+        assert!(horizon["ts"].is_string());
+    }
+
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(
+        text.stdout.contains(&format!("until        {FUTURE}\n")),
+        "{:?}",
+        text.stdout
+    );
+    assert!(text.stdout.contains("horizons\n"), "{:?}", text.stdout);
+    assert!(
+        text.stdout
+            .contains(&format!("  {PAST}  watchdog  (declared)\n")),
+        "{:?}",
+        text.stdout
+    );
+    assert!(
+        text.stdout
+            .contains(&format!("  {PAST_PLUS_15}  watchdog  nudge 1\n")),
+        "{:?}",
+        text.stdout
+    );
+
+    // An amend is not a resolution: the promise is still there to be resolved, and the
+    // first resolve still wins.
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--satisfied",
+            "--evidence",
+            "https://example.org/reports/9",
+        ])
+        .expect(0);
+    assert_eq!(state_of(&scratch, &id), "satisfied");
+
+    let second_resolve =
+        scratch.run(&["resolve", &id, "--cancelled", "--reason", "changed my mind"]);
+    second_resolve.expect(1);
+    assert!(
+        second_resolve.stderr.contains("already resolved"),
+        "{:?}",
+        second_resolve.stderr
+    );
+
+    // And a rung of the ladder that arrives after the promise ended is refused too:
+    // there is no horizon left to move.
+    let late_nudge = scratch.run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 3"]);
+    late_nudge.expect(1);
+    assert!(
+        late_nudge.stderr.contains("already resolved"),
+        "the error should name the resolution that ended it: {:?}",
+        late_nudge.stderr
+    );
+    assert_eq!(
+        scratch.lines().len(),
+        4,
+        "one promise, two amends, one resolve"
+    );
+}
+
+#[test]
+fn an_amend_by_anyone_but_the_debtor_is_refused() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    let before = scratch.lines();
+
+    // §8.2: moving a horizon is the debtor's own act. An observer who thinks the
+    // deadline should move is making an assessment, which is a different speech act.
+    let run = scratch.run(&["amend", &id, "--until", FUTURE, "--by", "desk"]);
+    run.expect(1);
+    assert!(
+        run.stderr.contains("§8.2"),
+        "the error should cite the rule: {:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("watchdog"),
+        "the error should name the debtor who may: {:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("assess"),
+        "the error should point at the verb that does fit: {:?}",
+        run.stderr
+    );
+    assert_eq!(scratch.lines(), before, "the ledger must be unchanged");
+
+    // The debtor naming itself is the same command, and it works.
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--by", "watchdog"])
+        .expect(0);
+    assert_eq!(state_of(&scratch, &id), "detached");
+}
+
+#[test]
+fn an_amend_with_an_unreadable_until_writes_nothing() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", FUTURE);
+    let before = scratch.lines();
+
+    let run = scratch.run(&["amend", &id, "--until", "2026-09-01T17:00:00"]);
+    run.expect(2);
+    assert!(run.stderr.contains("offset"), "{:?}", run.stderr);
+    assert_eq!(scratch.lines(), before);
+
+    // A deadline is required: there is nothing to amend without one.
+    scratch.run(&["amend", &id]).expect(2);
+    assert_eq!(scratch.lines(), before);
+
+    // Whitespace is not a reason.
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--reason", "   "])
+        .expect(2);
+    assert_eq!(scratch.lines(), before);
+}
+
+#[test]
+fn amending_an_unknown_id_fails_operationally() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&["amend", "pnk_000000", "--until", FUTURE]);
+    run.expect(1);
+    assert!(scratch.lines().is_empty());
+}
+
+#[test]
+fn a_deadline_may_move_earlier_too() {
+    let scratch = Scratch::new();
+    // Not every move is an extension — pinki has no opinion about the direction, only
+    // about the move being visible.
+    let id = scratch.promise("hand back the report", "watchdog", "desk", FUTURE);
+    let run = scratch.run(&["amend", &id, "--until", PAST, "--reason", "brought forward"]);
+    run.expect(0);
+    assert_eq!(run.state(), "overdue");
+}
+
+#[test]
+fn show_has_no_horizons_block_until_a_deadline_moves() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", FUTURE);
+
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(
+        !text.stdout.contains("horizons"),
+        "a promise nobody amended has one horizon, and a list of one is noise: {:?}",
+        text.stdout
+    );
+
+    // The JSON field is always there, so a consumer can test it rather than probe.
+    let json = scratch.run(&["show", &id, "--json"]);
+    json.expect(0);
+    let horizons = json.json()["horizons"].as_array().expect("horizons").len();
+    assert_eq!(horizons, 1, "the declaration is a horizon");
+}
+
+#[test]
+fn the_a2a_block_carries_the_horizon_as_it_stands() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 1"])
+        .expect(0);
+
+    let run = scratch.run(&["a2a", "task", &id]);
+    run.expect(0);
+    let block = run.json();
+    let (_, record) = block.as_object().expect("an object").iter().next().unwrap();
+    // A peer computing `now > until` for itself must get the answer this ledger gets —
+    // the divergence that filed issue #9 was exactly this, 32 minutes wide.
+    assert_eq!(record["until"], FUTURE);
+    assert_eq!(
+        record.as_object().expect("record object").len(),
+        5,
+        "still the §1 record and nothing else: {record}"
+    );
+}
+
 // ------------------------------------------------------------------ resolve
 
 #[test]
@@ -1458,22 +1716,22 @@ fn a2a_task_for_an_unknown_id_fails_operationally() {
 // Unreachable defensive code — the arm exists so the fold cannot panic on a ledger
 // somebody else wrote, and the surrounding code makes it unconstructible:
 //
-//   src/state.rs 206   `_ => State::Conditional` when a declared id has no memo entry.
+//   src/state.rs 311   `_ => State::Conditional` when a declared id has no memo entry.
 //                      Every id in `order` is solved before this runs, and `solve`
 //                      only ever terminates with `Memo::Done`.
-//   src/state.rs 257-259  the dangling arm in `solve`, for an id with no record.
+//   src/state.rs 366-368  the dangling arm in `solve`, for an id with no record.
 //                      `solve` is called only for ids in `records`, and an antecedent
 //                      is `contains_key`-checked before it is pushed on the stack, so
 //                      `self.records.get(current)` is always `Some`.
-//   src/state.rs 270   `None => State::Detached` for a resolution that is not one.
+//   src/state.rs 379   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
-//   src/verbs.rs 591   `_ => None` over `view.assessments`, which `fold` fills only
+//   src/verbs.rs 705   `_ => None` over `view.assessments`, which `fold` fills only
 //                      from `EventBody::Assess` events.
 //
 // Unreachable from a test harness:
 //
-//   src/verbs.rs 221   the `io::stdin().is_terminal()` refusal. A child spawned by a
+//   src/verbs.rs 223   the `io::stdin().is_terminal()` refusal. A child spawned by a
 //                      test never has a tty on stdin, and giving it one would mean a
 //                      pty dependency — which Cargo.toml exists to refuse. Exercised
 //                      by hand: `pinki promise` at a prompt.
@@ -1481,7 +1739,7 @@ fn a2a_task_for_an_unknown_id_fails_operationally() {
 // Test-internal — the failure arm of an assertion, which by construction does not run
 // while the suite is green:
 //
-//   src/event.rs 344      `panic!` in `every_event_type_round_trips`.
+//   src/event.rs 436      `panic!` in `every_event_type_round_trips`.
 //   src/ledger.rs 279,292 `other => panic!("expected Malformed, …")`.
 //
 // One more thing a reader should not have to rediscover: the summary's "Missed Lines"
