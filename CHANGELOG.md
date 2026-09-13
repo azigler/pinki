@@ -11,6 +11,19 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-13
+
+The first release shaped by adoption. Three issues filed by a fleet trying to run its
+promises through the released binary, each fixed and merged as its own PR: a deadline
+that moves without moving silently ([#9](https://github.com/azigler/pinki/issues/9)),
+an id you already have ([#5](https://github.com/azigler/pinki/issues/5)), and
+provenance that survives the seam ([#6](https://github.com/azigler/pinki/issues/6)).
+Every compatibility statement below was measured against the installed v0.1.0 binary
+rather than inferred from the schema — and the three answers differ, which is the
+reason to measure. Until this release both binaries answered `pinki 0.1.0` to
+`--version`; now the version number tells them apart, which is what makes those
+statements checkable by anyone holding a binary.
+
 ### Added
 
 - **The `amend` event, and the `amend` verb** — a deadline that moves, without a
@@ -242,6 +255,10 @@ own input, diff against the first write instead.
 
 ### Testing
 
+- **201 tests on the released tree** — 118 unit, 83 driving the real binary — at
+  **98.60%** line coverage against CI's 97% floor. The two counts below are what each
+  PR reported on its own branch; this is the union.
+
 - **158 tests** — 96 unit, 62 driving the real binary — including the three-step
   escalation ladder from #9 end to end, and the forward-tolerance property tested
   where it actually lives: a real ledger *file* carrying a line of an unknown type,
@@ -303,5 +320,6 @@ The nucleus: enough of pinki to actually use, and enough tests to believe it.
   not run while the suite is green. An unexplained gap and a deliberate one look
   identical in a coverage report; these are on the record as deliberate.
 
-[Unreleased]: https://github.com/azigler/pinki/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/azigler/pinki/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/azigler/pinki/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/azigler/pinki/releases/tag/v0.1.0

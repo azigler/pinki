@@ -2794,22 +2794,22 @@ fn the_fold_ignores_meta_on_every_event() {
 // Unreachable defensive code — the arm exists so the fold cannot panic on a ledger
 // somebody else wrote, and the surrounding code makes it unconstructible:
 //
-//   src/state.rs 316   `_ => State::Conditional` when a declared id has no memo entry.
+//   src/state.rs 328   `_ => State::Conditional` when a declared id has no memo entry.
 //                      Every id in `order` is solved before this runs, and `solve`
 //                      only ever terminates with `Memo::Done`.
-//   src/state.rs 371-373  the dangling arm in `solve`, for an id with no record.
+//   src/state.rs 383-385  the dangling arm in `solve`, for an id with no record.
 //                      `solve` is called only for ids in `records`, and an antecedent
 //                      is `contains_key`-checked before it is pushed on the stack, so
 //                      `self.records.get(current)` is always `Some`.
-//   src/state.rs 384   `None => State::Detached` for a resolution that is not one.
+//   src/state.rs 396   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
-//   src/verbs.rs 636   `_ => None` over `view.assessments`, which `fold` fills only
+//   src/verbs.rs 768   `_ => None` over `view.assessments`, which `fold` fills only
 //                      from `EventBody::Assess` events.
 //
 // Unreachable from a test harness:
 //
-//   src/verbs.rs 253   the `io::stdin().is_terminal()` refusal. A child spawned by a
+//   src/verbs.rs 267   the `io::stdin().is_terminal()` refusal. A child spawned by a
 //                      test never has a tty on stdin, and giving it one would mean a
 //                      pty dependency — which Cargo.toml exists to refuse. Exercised
 //                      by hand: `pinki promise` at a prompt.
@@ -2817,12 +2817,12 @@ fn the_fold_ignores_meta_on_every_event() {
 // Test-internal — the failure arm of an assertion, which by construction does not run
 // while the suite is green:
 //
-//   src/event.rs 397      `panic!` in `every_event_type_round_trips`.
-//   src/event.rs 517      `panic!` in `meta_survives_a_round_trip_on_every_event_type`.
-//   src/ledger.rs 280,293 `other => panic!("expected Malformed, …")`.
+//   src/event.rs 528      `panic!` in `every_event_type_round_trips`.
+//   src/event.rs 720      `panic!` in `meta_survives_a_round_trip_on_every_event_type`.
+//   src/ledger.rs 301,314 `other => panic!("expected Malformed, …")`.
 //
 // One more thing a reader should not have to rediscover: the summary's "Missed Lines"
-// column is larger than this list (39 against 11). The difference is not a set of
+// column is larger than this list (36 against 11). The difference is not a set of
 // hidden gaps — no source line accounts for it. pinki is built twice under coverage,
 // once as the binary the tests here drive and once as the unit-test harness, and a
 // function present in both but exercised in only one is billed as missed lines against
