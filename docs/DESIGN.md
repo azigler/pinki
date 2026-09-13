@@ -99,17 +99,33 @@ The rules are all shape and no content:
 |---|---|
 | It must be an object | A consumer has to be able to take the one key it understands and leave the rest alone. That is what makes `meta` safe to ignore. |
 | It may not be empty | `"meta": {}` is provenance offered and left blank. Omit it instead: an absent `meta` writes no key at all. |
-| It is capped at 8 KiB of JSON | A ledger line is a line. Provenance is a handful of short keys; a payload belongs behind a reference *in* `meta`, not inside it. |
+| It is capped at 8 KiB, measured on its canonicalized, compact serialized form after parsing — not on the literal `--meta` input bytes | A ledger line is a line. Provenance is a handful of short keys; a payload belongs behind a reference *in* `meta`, not inside it. |
 | Nothing else | Nesting, arrays, nulls, keys pinki has never heard of — all fine. Opaque means opaque. |
 
 A `meta` that breaks one of the first three is malformed input: exit 2, nothing
 appended, like every other refusal at the edge (§5).
+
+Because the cap is measured post-parse, a caller doing their own byte-budgeting
+should expect whitespace stripped and keys sorted before the measurement is taken
+— padding the literal `--meta` argument with whitespace does not spend any of the
+8 KiB; only what survives parsing does.
+
+**Compatibility.** A ledger containing `meta` needs this version or later to be
+read without silent loss: the installed v0.1.0 reads such a ledger fine — correct
+states, exit 0 — but `meta` is silently absent from every surface it prints, and
+v0.1.0 cannot write `meta` at all (no `--meta` flag; the stdin form is refused,
+which is issue #6 itself). See the CHANGELOG's Compatibility section for the full
+transcript.
 
 One honest limit. `meta` is held as a JSON object and re-emitted with its keys
 **sorted**, so key order is canonicalised on the first write. Values, types and
 nesting survive exactly, and JSON objects are unordered by definition, so nothing is
 lost that the format ever promised to keep — but if you are diffing bytes, diff them
 against the first write rather than against your input.
+
+A second honest limit, in the same spirit: if your input JSON repeats a key inside
+`meta`, the parser keeps only the last occurrence (`serde_json`'s documented
+last-wins behavior) — silently, before pinki ever sees the object.
 
 Every event may carry a `meta`, not only the record — see §4.
 

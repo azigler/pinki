@@ -38,10 +38,14 @@ tools can depend on them, not merely read them.
 - Three shape rules at the edge, each exit 2 with nothing appended: `meta` must be an
   object (a consumer has to be able to read the one key it knows and ignore the rest),
   may not be empty (`{}` is provenance offered and left blank — omit it and no key is
-  written at all), and is capped at 8 KiB of JSON (a ledger line is a line). Nothing
-  *inside* it is checked: nesting, arrays, nulls and unknown keys are all fine, because
-  opaque means opaque. On the stdin form of `promise`, a `--meta` flag is refused
-  rather than silently ignored.
+  written at all), and is capped at 8 KiB, measured on its canonicalized, compact
+  serialized form after parsing — not on the literal `--meta` input bytes, so a caller
+  byte-budgeting input should expect whitespace stripped and keys sorted before the
+  measurement (a ledger line is a line). Nothing *inside* it is checked: nesting,
+  arrays, nulls and unknown keys are all fine, because opaque means opaque. On the
+  stdin form of `promise`, a `--meta` flag is refused rather than silently ignored.
+  Duplicate keys inside `meta` resolve last-wins on parse (`serde_json`'s documented
+  behavior), silently.
 
 ### Compatibility with the transcript
 
