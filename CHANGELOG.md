@@ -61,9 +61,12 @@ meta-bearing ledger written by this version, rather than assumed:
   (`resolve … --released` → rc 0), and the `meta` on the lines it did not write is
   untouched afterwards; this version still reads it back in full.
 - v0.1.0 cannot *write* one, which is issue #6 itself: a stdin record carrying `meta`
-  is refused — `unknown field 'meta', expected one of 'id', 'promise', 'by', 'to',
-  'on', 'until', 'task'`, rc 2 — and it has no `--meta` flag (`error: unexpected
-  argument '--meta' found`, rc 2).
+  is refused, rc 2, and it has no `--meta` flag either (`error: unexpected argument
+  '--meta' found`, rc 2). The stdin refusal, verbatim:
+
+  ```
+  unknown field `meta`, expected one of `id`, `promise`, `by`, `to`, `on`, `until`, `task`
+  ```
 
 So the honest statement is narrower than "old readers are fine" and narrower than
 "old readers break": **a ledger with `meta` needs this version or later to be read
