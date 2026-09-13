@@ -66,6 +66,10 @@ impl Event {
             EventBody::Amend { promise, .. }
             | EventBody::Resolve { promise, .. }
             | EventBody::Assess { promise, .. } => promise,
+            // An event this build cannot read is an event whose subject it cannot read
+            // either. The empty string is no id — it matches nothing and reserves
+            // nothing — which is the honest answer and the safe one.
+            EventBody::Unknown => "",
         }
     }
 
@@ -122,6 +126,25 @@ pub enum EventBody {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// An event whose `type` this build does not know — almost certainly written by a
+    /// newer pinki, or by another implementation of the vocabulary.
+    ///
+    /// It exists so that **one unknown line cannot cost you the whole ledger**. Without
+    /// it, a v0.1.0 reader handed a ledger containing an `amend` refuses to read the
+    /// file at all: the parse fails, and [`crate::ledger::read_at`] treats a line it
+    /// cannot parse as fatal — correctly, because a line silently skipped is §4's
+    /// truncation told one line at a time. This variant draws the distinction that
+    /// makes both rules true: a line that is *not an event* is still fatal, while an
+    /// event of a type this build has not heard of is read, counted, warned about on
+    /// stderr, and ignored by the fold.
+    ///
+    /// The body is deliberately dropped rather than kept: pinki never rewrites a line
+    /// it read, so nothing here is ever serialized back out, and holding a payload
+    /// nothing can interpret would only invite something to try. It also means an
+    /// `Event` carrying this variant does **not** round-trip, which is exactly why
+    /// nothing appends one — the file on disk is the record, not this struct.
+    #[serde(other)]
+    Unknown,
 }
 
 impl EventBody {

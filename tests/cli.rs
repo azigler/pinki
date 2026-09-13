@@ -664,6 +664,55 @@ fn an_amend_with_an_unreadable_until_writes_nothing() {
     assert_eq!(scratch.lines(), before);
 }
 
+/// The forward-compatibility property, through the real reader.
+///
+/// This is the half that has to be tested against a *file*, not an in-memory `Vec`:
+/// the claim is about what a build does when a ledger carries an event type it has
+/// never heard of, and that is a deserialization question before it is a fold question.
+/// v0.1.0 answers it by refusing the entire file — which is exactly why this version
+/// answers it differently, and why the CHANGELOG says so out loud.
+#[test]
+fn an_event_type_this_build_does_not_know_costs_nothing_else_in_the_ledger() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 1"])
+        .expect(0);
+
+    // A line a newer pinki might write, appended between events this one understands.
+    let mut text = fs::read_to_string(scratch.ledger()).expect("the ledger");
+    text.push_str(
+        "{\"ts\":\"2026-09-02T09:00:00Z\",\"type\":\"frobnicate\",\"promise\":\"pnk_000000\",\"wat\":1}\n",
+    );
+    fs::write(scratch.ledger(), &text).expect("write the ledger back");
+
+    let run = scratch.run(&["ls", "--json"]);
+    run.expect(0);
+    let listed = run.json();
+    let rows = listed.as_array().expect("an array");
+    assert_eq!(rows.len(), 1, "the promise is still readable: {rows:?}");
+    assert_eq!(rows[0]["id"], id.as_str());
+    // The events it does know still fold exactly as they did.
+    assert_eq!(rows[0]["until"], FUTURE);
+    assert_eq!(rows[0]["state"], "detached");
+
+    // Loud, not fatal, and never silent: the warning names the line.
+    assert!(
+        run.stderr.contains("unknown event type"),
+        "the reader must say what it skipped: {:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("line 3"),
+        "the warning should name the line: {:?}",
+        run.stderr
+    );
+
+    // A line that is not an event at all is still fatal — that rule did not move.
+    fs::write(scratch.ledger(), format!("{text}{{not json\n")).expect("write the ledger back");
+    scratch.run(&["ls", "--json"]).expect(1);
+}
+
 #[test]
 fn amending_an_unknown_id_fails_operationally() {
     let scratch = Scratch::new();
@@ -1716,14 +1765,14 @@ fn a2a_task_for_an_unknown_id_fails_operationally() {
 // Unreachable defensive code — the arm exists so the fold cannot panic on a ledger
 // somebody else wrote, and the surrounding code makes it unconstructible:
 //
-//   src/state.rs 311   `_ => State::Conditional` when a declared id has no memo entry.
+//   src/state.rs 316   `_ => State::Conditional` when a declared id has no memo entry.
 //                      Every id in `order` is solved before this runs, and `solve`
 //                      only ever terminates with `Memo::Done`.
-//   src/state.rs 366-368  the dangling arm in `solve`, for an id with no record.
+//   src/state.rs 371-373  the dangling arm in `solve`, for an id with no record.
 //                      `solve` is called only for ids in `records`, and an antecedent
 //                      is `contains_key`-checked before it is pushed on the stack, so
 //                      `self.records.get(current)` is always `Some`.
-//   src/state.rs 379   `None => State::Detached` for a resolution that is not one.
+//   src/state.rs 384   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
 //   src/verbs.rs 705   `_ => None` over `view.assessments`, which `fold` fills only
@@ -1739,11 +1788,11 @@ fn a2a_task_for_an_unknown_id_fails_operationally() {
 // Test-internal — the failure arm of an assertion, which by construction does not run
 // while the suite is green:
 //
-//   src/event.rs 436      `panic!` in `every_event_type_round_trips`.
-//   src/ledger.rs 279,292 `other => panic!("expected Malformed, …")`.
+//   src/event.rs 459      `panic!` in `every_event_type_round_trips`.
+//   src/ledger.rs 300,313 `other => panic!("expected Malformed, …")`.
 //
 // One more thing a reader should not have to rediscover: the summary's "Missed Lines"
-// column is larger than this list (34 against 10). The difference is not a set of
+// column is larger than this list (31 against 10). The difference is not a set of
 // hidden gaps — no source line accounts for it. pinki is built twice under coverage,
 // once as the binary the tests here drive and once as the unit-test harness, and a
 // function present in both but exercised in only one is billed as missed lines against

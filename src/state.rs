@@ -267,6 +267,11 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
             EventBody::Assess { promise, .. } => {
                 assessments.entry(promise.as_str()).or_default().push(event);
             }
+            // An event type this build does not know changes nothing it could compute.
+            // The line is not lost — it is still in the file, and `ledger::read_at`
+            // already said so on stderr — but the fold has no reading of it to offer,
+            // and inventing one would be worse than declining to.
+            EventBody::Unknown => {}
         }
     }
 
@@ -885,22 +890,43 @@ mod tests {
     }
 
     #[test]
-    fn a_fold_that_ignores_amend_events_degrades_to_first_wins() {
-        // §4's promise to anyone else's implementation: a reader that does not know the
-        // `amend` type sees exactly the v0.1.0 ledger — the declared horizon, first
-        // declaration wins — rather than a broken one.
-        let full = [
-            promise("pnk_a", None, UNTIL),
-            amended("pnk_a", AFTER, NUDGE_1),
-            amended("pnk_a", NUDGE_1, NUDGE_2),
+    fn a_fold_ignores_an_event_type_it_does_not_know() {
+        // Forward tolerance, through the real deserializer rather than around it: a
+        // line whose `type` this build has never heard of is read (see
+        // `ledger::read_at`, which also warns), and then changes nothing the fold
+        // computes. The answer is the one the known events alone produce.
+        let lines = [
+            r#"{"ts":"2026-08-28T20:14:03Z","type":"promise","id":"pnk_a","promise":"do the pnk_a thing","by":"…/debtor","to":"…/creditor","until":"2026-09-01T17:00:00Z"}"#,
+            r#"{"ts":"2026-09-01T17:05:00Z","type":"frobnicate","promise":"pnk_a","until":"2099-01-01T00:00:00Z"}"#,
+            r#"{"ts":"2026-09-01T17:10:00Z","type":"amend","promise":"pnk_a","by":"…/debtor","until":"2026-09-01T17:30:00Z"}"#,
         ];
-        let ignored: Vec<Event> = full
+        let events: Vec<Event> = lines
             .iter()
-            .filter(|event| !matches!(event.body, EventBody::Amend { .. }))
-            .cloned()
+            .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}")))
             .collect();
+        assert_eq!(events[1].body, EventBody::Unknown);
 
-        let folded = fold(&ignored, ts(BETWEEN_NUDGES));
+        let folded = fold(&events, ts(BETWEEN_NUDGES));
+        let view = folded.get("pnk_a").unwrap();
+        // The amend applied; the unknown line's `until` did not, and it added no
+        // horizon of its own.
+        assert_eq!(view.until(), NUDGE_2);
+        assert_eq!(view.state, State::Detached);
+        assert_eq!(view.horizons.len(), 2);
+        assert_eq!(folded.len(), 1, "an unknown event declares nothing");
+    }
+
+    #[test]
+    fn a_fold_given_no_amend_events_is_first_wins() {
+        // The v0.1.0 answer, unchanged: nothing moved the horizon, so the declared one
+        // stands. (What an OLD BINARY does with a ledger that *does* carry an amend is
+        // a different question, and not this fold's — v0.1.0's parser refuses the file
+        // outright. See CHANGELOG's compatibility note.)
+        let log = [
+            promise("pnk_a", None, UNTIL),
+            promise("pnk_a", None, "2099-01-01T00:00:00Z"),
+        ];
+        let folded = fold(&log, ts(BETWEEN_NUDGES));
         let view = folded.get("pnk_a").unwrap();
         assert_eq!(view.until(), UNTIL);
         assert_eq!(view.state, State::Overdue);

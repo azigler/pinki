@@ -199,9 +199,14 @@ Four properties make this small enough to belong here:
 - **The declaration is never rewritten.** First declaration still wins; an amend is a
   new line beside it, not an edit to it. A re-declaration is the *silent* version of
   this and stays refused.
-- **A reader that does not know `amend` degrades to v0.1.0.** Skip the event type and
-  the fold is the old one — the horizon the promise was born with — rather than a
-  broken one.
+- **A reader that skips unknown event types degrades to first-wins** — the horizon the
+  promise was born with — rather than to something broken. **v0.1.0 is not such a
+  reader**: its parser refuses a ledger containing an `amend` line outright, so a
+  ledger with amends in it needs this version or later. That refusal is the reason this
+  version is the first *forward-tolerant* one: an event whose `type` it does not know
+  is read, warned about on stderr with its line number, and ignored by the fold, so the
+  next event type this format grows will not cost anyone the rest of their file. A line
+  that is not an event at all is still fatal.
 - **Only the debtor may amend.** A promise is the debtor's own declaration, so moving
   its horizon is a new act by the same party. A *creditor* or third party who thinks a
   deadline should move is making an assessment, which is a different speech act and
@@ -244,6 +249,13 @@ authority pinki does not have and should not pretend to — see §6.
 
 **`assess`** — publishes an assessment. Author, state, timestamp, optional note.
 Never terminal: an assessed promise stays exactly as open as it was.
+
+**Unknown event types.** A reader that meets a `type` it does not know keeps the line,
+says so on stderr with its line number, and folds without it. That is not the same
+tolerance as skipping a line it could not parse at all — that one stays fatal, because
+§4's own point is that quietly dropping a line you cannot read is truncation told one
+line at a time. The distinction is "an event I have not heard of" versus "not an
+event."
 
 Because state is a fold, the log is the whole system. Copy the file and you have
 copied the state. Concatenate two ledgers and you have a joined view. Truncate it
