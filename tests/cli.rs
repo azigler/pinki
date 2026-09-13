@@ -919,6 +919,9 @@ fn the_escalation_ladder_nudges_one_promise_twice() {
     for horizon in horizons {
         assert_eq!(horizon["by"], "watchdog");
         assert!(horizon["ts"].is_string());
+        // A ladder that carries no provenance is handed back none: `meta` is offered,
+        // never manufactured.
+        assert!(horizon.get("meta").is_none(), "{horizon}");
     }
 
     let text = scratch.run(&["show", &id]);
@@ -2162,6 +2165,28 @@ fn meta_bytes(value: &serde_json::Value) -> String {
     serde_json::to_string(&value["meta"]).expect("re-encode meta")
 }
 
+/// The same value with every `meta` key removed, however deep it sits.
+///
+/// This is what makes "the fold ignores `meta`" checkable against a whole read surface
+/// rather than against the four states alone: strip the provenance back off a `show
+/// --json` taken over a ledger with `meta` on every line, and what is left has to be
+/// byte-identical to the one taken before any of it was there.
+fn without_meta(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .filter(|(key, _)| key.as_str() != "meta")
+                .map(|(key, value)| (key.clone(), without_meta(value)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(without_meta).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 #[test]
 fn meta_from_the_flag_rides_the_promise_line_verbatim() {
     let scratch = Scratch::new();
@@ -2480,6 +2505,92 @@ fn resolve_and_assess_carry_their_own_meta() {
 }
 
 #[test]
+fn nested_meta_on_an_amend_round_trips_through_the_line_and_show_byte_for_byte() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 1"])
+        .expect(0);
+    let nudge = scratch.run(&[
+        "amend", &id, "--until", FUTURE, "--reason", "nudge 2", "--meta", META,
+    ]);
+    nudge.expect(0);
+
+    // 1. the log — last on the line, after the reason, and byte for byte.
+    let lines = scratch.lines();
+    assert!(
+        lines[2].ends_with(&format!(r#""meta":{META}}}"#)),
+        "{:?}",
+        lines[2]
+    );
+    let events = scratch.events();
+    assert_eq!(events[2]["type"], "amend");
+    assert_eq!(
+        serde_json::to_string(&events[2]["meta"]).unwrap(),
+        META,
+        "the ledger line did not carry meta verbatim"
+    );
+    // The rung that said nothing writes no key at all — an absent provenance is not an
+    // empty one.
+    assert!(
+        !events[1].contains_key("meta"),
+        "an amend without --meta writes no meta key: {:?}",
+        lines[1]
+    );
+
+    // 2. show --json, under the horizon the amend spoke.
+    let show = scratch.run(&["show", &id, "--json"]);
+    show.expect(0);
+    let detail = show.json();
+    let horizons = detail["horizons"].as_array().expect("horizons");
+    assert_eq!(horizons.len(), 3, "{horizons:?}");
+    assert!(horizons[0].get("meta").is_none(), "{}", horizons[0]);
+    assert!(horizons[1].get("meta").is_none(), "{}", horizons[1]);
+    assert_eq!(meta_bytes(&horizons[2]), META, "show --json lost meta");
+    assert!(
+        detail.get("meta").is_none(),
+        "the record itself carried none: {detail}"
+    );
+
+    // 3. the human block — one line, under the horizon it belongs to, in the same
+    // shape an assessment's provenance is printed in.
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(
+        text.stdout.contains(&format!(
+            "  {FUTURE}  watchdog  nudge 2\n      meta     {META}\n"
+        )),
+        "{:?}",
+        text.stdout
+    );
+}
+
+#[test]
+fn an_amends_meta_is_refused_on_the_same_three_rules_as_every_other() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    let before = scratch.lines();
+
+    for (meta, expected) in [
+        ("[]", "an array"),
+        ("{}", "empty object"),
+        ("not json at all", "--meta is not JSON"),
+    ] {
+        let run = scratch.run(&["amend", &id, "--until", FUTURE, "--meta", meta]);
+        run.expect(2);
+        assert!(run.stderr.contains(expected), "{:?}", run.stderr);
+        assert_eq!(scratch.lines(), before, "nothing may be appended");
+    }
+
+    // And the shape is checked before the ledger is consulted: an unknown id with a
+    // malformed meta is malformed, not a lookup miss.
+    let run = scratch.run(&["amend", "pnk_000000", "--until", FUTURE, "--meta", "[]"]);
+    run.expect(2);
+    assert_eq!(scratch.lines(), before);
+}
+
+#[test]
 fn show_renders_the_records_meta_on_one_line_when_it_has_one() {
     let scratch = Scratch::new();
     let run = scratch.run(&[
@@ -2527,6 +2638,19 @@ fn the_fold_ignores_meta_on_every_event() {
         .id();
     let late = scratch.promise("ship it", "author", "publisher", PAST);
     let doomed = scratch.promise("index it", "publisher", "author", FUTURE);
+    // One moved horizon, so `amend` is in the ledger this property is claimed over —
+    // onto a rung that is also in the past, which keeps the state it computes stable
+    // and the claim about `meta` the only thing under test.
+    scratch
+        .run(&[
+            "amend",
+            &late,
+            "--until",
+            PAST_PLUS_15,
+            "--reason",
+            "nudge 1",
+        ])
+        .expect(0);
     scratch
         .run(&[
             "resolve",
@@ -2558,6 +2682,12 @@ fn the_fold_ignores_meta_on_every_event() {
             })
             .collect()
     };
+    let detail_of = |scratch: &Scratch, id: &str| -> serde_json::Value {
+        let run = scratch.run(&["show", id, "--json"]);
+        run.expect(0);
+        run.json()
+    };
+
     let before = states(&scratch);
     // The baseline is only worth as much as the states it actually covers.
     assert_eq!(
@@ -2569,6 +2699,19 @@ fn the_fold_ignores_meta_on_every_event() {
             (doomed, "cancelled".to_string()),
         ]
     );
+    let details_before: Vec<serde_json::Value> = before
+        .iter()
+        .map(|(id, _)| detail_of(&scratch, id))
+        .collect();
+    // Every event type is in the file, including the one this ledger exists to add.
+    let types: Vec<String> = scratch
+        .events()
+        .iter()
+        .map(|event| event["type"].as_str().expect("a type").to_string())
+        .collect();
+    for kind in ["promise", "amend", "resolve", "assess"] {
+        assert!(types.iter().any(|t| t == kind), "no {kind} in {types:?}");
+    }
 
     // Now put a different meta on every single event — including keys that look like
     // fields the fold does read.
@@ -2590,12 +2733,11 @@ fn the_fold_ignores_meta_on_every_event() {
         "no meta anywhere in a ledger may change a computed state"
     );
 
-    // The same for the per-promise read: state, resolution and assessments are
-    // untouched, and the meta rides along beside them.
-    for (id, _) in &before {
-        let run = scratch.run(&["show", id, "--json"]);
-        run.expect(0);
-        let detail = run.json();
+    // The same for the per-promise read: state, resolution, horizons and assessments
+    // are untouched, and the meta rides along beside them. Strip the provenance back
+    // off and every byte of the read surface is what it was before any of it existed.
+    for ((id, _), was) in before.iter().zip(&details_before) {
+        let detail = detail_of(&scratch, id);
         assert!(detail["meta"].is_object(), "{id}: {detail}");
         assert_eq!(detail["meta"]["state"], "satisfied");
         assert_eq!(
@@ -2606,7 +2748,30 @@ fn the_fold_ignores_meta_on_every_event() {
                 .map(|(_, state)| state.as_str())
                 .expect("a state")
         );
+        assert_eq!(
+            serde_json::to_string(&without_meta(&detail)).unwrap(),
+            serde_json::to_string(was).unwrap(),
+            "{id}: meta changed a read surface it may only ride on"
+        );
     }
+
+    // The amended one, specifically: the horizon still reads off the event's own
+    // `until`, not off the `until` key sitting inside its `meta` — the whole reason
+    // that key is in the rewrite.
+    let amended = detail_of(&scratch, &late);
+    assert_eq!(amended["until"], PAST_PLUS_15);
+    let horizons = amended["horizons"].as_array().expect("horizons");
+    assert_eq!(horizons.len(), 2, "{horizons:?}");
+    assert_eq!(horizons[1]["until"], PAST_PLUS_15);
+    assert_eq!(horizons[1]["reason"], "nudge 1");
+    assert_eq!(horizons[1]["meta"]["until"], "1999-01-01T00:00:00Z");
+    // The declaration's horizon carries no meta of its own, whatever the `promise`
+    // line holds: the record's provenance is handed back with the record.
+    assert!(
+        horizons[0].get("meta").is_none(),
+        "the declared horizon speaks no provenance: {}",
+        horizons[0]
+    );
 }
 
 // ------------------------------------------------------------ what stays uncovered

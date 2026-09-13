@@ -27,10 +27,11 @@
 //!
 //! ## `meta` rides every event, and none of them are read
 //!
-//! §1's open door is not only the record's. A `resolve` and an `assess` carry their
-//! own provenance in an adopting system — which component resolved this, on whose
-//! behalf, citing what — so every event type may carry a `meta` object, attached the
-//! one way, through [`EventBody::with_meta`], and always serialized last.
+//! §1's open door is not only the record's. An `amend`, a `resolve` and an `assess`
+//! carry their own provenance in an adopting system — which component moved this
+//! horizon, which resolved it, on whose behalf, citing what — so every event type may
+//! carry a `meta` object, attached the one way, through [`EventBody::with_meta`], and
+//! always serialized last.
 //!
 //! It is opaque everywhere: [`crate::state`]'s fold never looks at it, so no `meta`
 //! anywhere in a ledger can change a computed state. §4 — "the log is the whole
@@ -98,8 +99,13 @@ impl Event {
     pub fn meta(&self) -> Option<&Meta> {
         match &self.body {
             EventBody::Promise(p) => p.meta.as_ref(),
-            EventBody::Resolve { meta, .. } | EventBody::Assess { meta, .. } => meta.as_ref(),
-            EventBody::Amend { .. } | EventBody::Unknown => None,
+            EventBody::Amend { meta, .. }
+            | EventBody::Resolve { meta, .. }
+            | EventBody::Assess { meta, .. } => meta.as_ref(),
+            // An event this build cannot read is one whose `meta` it cannot locate
+            // either — the body was dropped at parse time, so there is nothing to hand
+            // back and nothing to invent.
+            EventBody::Unknown => None,
         }
     }
 }
@@ -130,6 +136,11 @@ pub enum EventBody {
         /// amends on a clock and has one reason for every rung.
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+        /// Opaque provenance for the act of amending — never for the promise. The
+        /// ladder that has one reason per rung has one provenance row per rung too:
+        /// which watchdog moved this, on which attempt, under which policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Meta>,
     },
     /// Ends a promise.
     Resolve {
@@ -178,16 +189,18 @@ pub enum EventBody {
 impl EventBody {
     /// Attach opaque provenance — the one way `meta` gets onto any event.
     ///
-    /// A `promise` event's `meta` is the record's field, and a `resolve`/`assess`
-    /// event's is its own; one method rather than three so "every event may carry
-    /// meta" is a single statement in the code as well as in §4.
+    /// A `promise` event's `meta` is the record's field, and an `amend`/`resolve`/
+    /// `assess` event's is its own; one method rather than four so "every event may
+    /// carry meta" is a single statement in the code as well as in §4.
     pub fn with_meta(mut self, meta: Option<Meta>) -> Self {
         match &mut self {
             EventBody::Promise(record) => record.meta = meta,
-            EventBody::Resolve { meta: slot, .. } | EventBody::Assess { meta: slot, .. } => {
-                *slot = meta
-            }
-            EventBody::Amend { .. } | EventBody::Unknown => {}
+            EventBody::Amend { meta: slot, .. }
+            | EventBody::Resolve { meta: slot, .. }
+            | EventBody::Assess { meta: slot, .. } => *slot = meta,
+            // Nothing is ever attached to a line this build could not read: pinki does
+            // not rewrite a line it read, and an `Unknown` body is never serialized.
+            EventBody::Unknown => {}
         }
         self
     }
@@ -208,6 +221,7 @@ impl EventBody {
             by: by.into(),
             until: until.into(),
             reason,
+            meta: None,
         }
     }
 
@@ -524,6 +538,7 @@ mod tests {
             r#"{"ts":"2026-09-01T16:02:11Z","type":"resolve","promise":"pnk_4f3a91","as":"satisfied","by":"…/reviewer","evidence":["https://example.org/reviews/91"]}"#,
             r#"{"ts":"2026-09-02T09:00:00Z","type":"assess","promise":"pnk_88de10","state":"violated","observer":"…/author","note":"nothing shipped, no reason given"}"#,
             r#"{"ts":"2026-09-01T15:00:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T18:00:00Z","reason":"the schema landed late"}"#,
+            r#"{"ts":"2026-09-01T17:05:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T18:30:00Z","reason":"nudge 2","meta":{"attempt":2,"by":"expected-gap-watchdog"}}"#,
         ];
         let events: Vec<Event> = lines
             .iter()
@@ -542,6 +557,13 @@ mod tests {
             EventBody::Amend { until, reason: Some(reason), .. }
                 if until == "2026-09-01T18:00:00Z" && reason == "the schema landed late"
         ));
+        // An amend line as another writer sends it: provenance last, and read back as
+        // the event's own rather than the promise's.
+        assert_eq!(events[3].meta(), None);
+        assert_eq!(
+            events[4].meta(),
+            Some(&meta(r#"{"attempt":2,"by":"expected-gap-watchdog"}"#))
+        );
     }
 
     // ------------------------------------------------------------------ meta
@@ -572,12 +594,30 @@ mod tests {
 
         let a = Event::new(
             "2026-09-02T09:00:00Z",
-            EventBody::violated("pnk_88de10", "…/author", None).with_meta(Some(provenance)),
+            EventBody::violated("pnk_88de10", "…/author", None).with_meta(Some(provenance.clone())),
         );
         let text = serde_json::to_string(&a).unwrap();
         assert_eq!(
             text,
             r#"{"ts":"2026-09-02T09:00:00Z","type":"assess","promise":"pnk_88de10","state":"violated","observer":"…/author","meta":{"by":"offboard","ref":"dotfiles-6"}}"#
+        );
+
+        // After `reason`, which is itself last on an amend line — so a nudge's
+        // provenance never displaces the field a reader is looking for.
+        let m = Event::new(
+            "2026-09-01T17:05:00Z",
+            EventBody::amend(
+                "pnk_4f3a91",
+                "…/reviewer",
+                "2026-09-01T17:15:00Z",
+                Some("nudge 1".into()),
+            )
+            .with_meta(Some(provenance)),
+        );
+        let text = serde_json::to_string(&m).unwrap();
+        assert_eq!(
+            text,
+            r#"{"ts":"2026-09-01T17:05:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T17:15:00Z","reason":"nudge 1","meta":{"by":"offboard","ref":"dotfiles-6"}}"#
         );
     }
 
@@ -601,11 +641,34 @@ mod tests {
                 "2026-09-02T09:00:00Z",
                 EventBody::violated("pnk_88de10", "…/author", None),
             ),
+            Event::new(
+                "2026-09-01T17:05:00Z",
+                EventBody::amend(
+                    "pnk_4f3a91",
+                    "…/reviewer",
+                    "2026-09-01T17:15:00Z",
+                    Some("nudge 1".into()),
+                ),
+            ),
         ] {
             let text = serde_json::to_string(&ev).unwrap();
             assert!(!text.contains("meta"), "{text}");
             assert!(ev.meta().is_none(), "{text}");
         }
+    }
+
+    #[test]
+    fn an_unknown_event_has_no_meta_and_will_not_be_given_one() {
+        // The body was dropped at parse time, so there is no `meta` to hand back and
+        // nowhere to put one. Attaching is a no-op rather than an error: nothing ever
+        // writes this variant back out, so a silently-unattached `meta` cannot reach a
+        // file. The arms are one line each and unreachable through the CLI, which is
+        // why they are asserted here instead of left looking like an oversight.
+        let ev = Event::new("2026-09-01T17:05:00Z", EventBody::Unknown);
+        assert!(ev.meta().is_none());
+        let body = EventBody::Unknown.with_meta(Some(meta(r#"{"by":"offboard"}"#)));
+        assert_eq!(body, EventBody::Unknown);
+        assert!(Event::new("2026-09-01T17:05:00Z", body).meta().is_none());
     }
 
     #[test]
@@ -634,6 +697,21 @@ mod tests {
             Event::new(
                 "2026-09-02T09:00:00Z",
                 EventBody::violated("pnk_88de10", "…/author", None)
+                    .with_meta(Some(provenance.clone())),
+            ),
+            Event::new(
+                "2026-09-01T17:05:00Z",
+                EventBody::amend(
+                    "pnk_4f3a91",
+                    "…/reviewer",
+                    "2026-09-01T17:15:00Z",
+                    Some("nudge 1".into()),
+                )
+                .with_meta(Some(provenance.clone())),
+            ),
+            Event::new(
+                "2026-09-01T17:20:00Z",
+                EventBody::amend("pnk_4f3a91", "…/reviewer", "2026-09-01T17:30:00Z", None)
                     .with_meta(Some(provenance.clone())),
             ),
         ] {

@@ -386,14 +386,25 @@ tolerance as skipping a line it could not parse at all — that one stays fatal,
 line at a time. The distinction is "an event I have not heard of" versus "not an
 event."
 
-**`meta` on any of the three.** §1's open door is not only the record's. Resolving and
-assessing carry their own provenance in an adopting system — which component resolved
-this, on whose behalf, citing what — and that provenance belongs to the *act*, not to
-the promise, so it rides the event that performed it:
+**`meta` on any of the four.** §1's open door is not only the record's. Amending,
+resolving and assessing carry their own provenance in an adopting system — which
+component moved this horizon, which resolved it, on whose behalf, citing what — and
+that provenance belongs to the *act*, not to the promise, so it rides the event that
+performed it:
 
 ```jsonl
+{"ts":"2026-09-01T16:45:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T18:30:00Z","reason":"nudge 2","meta":{"attempt":2,"by":"expected-gap-watchdog"}}
 {"ts":"2026-09-01T16:02:11Z","type":"resolve","promise":"pnk_4f3a91","as":"satisfied","by":"…/reviewer","evidence":["https://example.org/reviews/91"],"meta":{"by":"expected-gap-watchdog","cites_ref":"sha:9c1f0e"}}
 ```
+
+An escalation ladder is the clearest case: it is the thing that writes most amends, and
+it is exactly the writer with provenance to carry — which rung this is, on which
+attempt, under which policy. A ladder whose reasons survive the seam but whose
+provenance does not has been made to project away the half that says who was nudging,
+which is the gap §1 opened this door to close. `show` hands it back under the horizon it
+belongs to (`horizons[].meta`, and one line under that horizon in the text block); the
+declaration's own horizon carries none, because a promise's provenance is the record's
+`meta` and one fact should not be answerable in two places.
 
 Always last on the line, always optional, always opaque — §1's three shape rules, and
 no interpretation anywhere. The fold does not read `meta` on any event, which is a
@@ -421,7 +432,8 @@ pinki promise "hand back a reviewed schema" \
       --by reviewer --to author --until 2026-09-01T17:00Z [--on pnk_0c2b77] [--id ID] \
       [--meta '{"by":"scheduler","ref":"run-4131"}']
 
-pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed late"]
+pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed late"] \
+      [--meta '{"by":"expected-gap-watchdog","attempt":2}']
 
 pinki resolve pnk_4f3a91 --satisfied --evidence https://example.org/reviews/91
 pinki resolve pnk_4f3a91 --cancelled --reason "upstream schema was withdrawn"
@@ -445,17 +457,19 @@ first, once there is more than one.
 
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
 explicit one that disagrees. `--reason` is encouraged, not required: an escalation
-ladder amends on a clock and has one reason for every rung.
+ladder amends on a clock and has one reason for every rung — and, when it carries
+provenance, one `--meta` for every rung too.
 
 `promise` mints an id unless `--id` gives it one, and an id you give it is opaque —
 § 1's id policy, enforced where the input arrives. Every other verb takes whatever id
 the ledger holds; none of them re-checks its shape, because an id that could be
 declared has to be resolvable.
 
-`--meta` takes one JSON object and is accepted by `promise`, `resolve` and `assess`
-(§1, §4). On the stdin form of `promise` it is refused rather than ignored — the
-record you piped in carries its own `meta`, and guessing between two answers is how
-provenance goes missing at exactly the seam this field exists to keep whole.
+`--meta` takes one JSON object and is accepted by every verb that writes a line —
+`promise`, `amend`, `resolve` and `assess` (§1, §4). On the stdin form of `promise` it
+is refused rather than ignored — the record you piped in carries its own `meta`, and
+guessing between two answers is how provenance goes missing at exactly the seam this
+field exists to keep whole.
 
 The two `a2a` verbs **only write JSON to stdout**. They do not call anything. You
 pipe them into whatever A2A client you already run — that is the whole integration

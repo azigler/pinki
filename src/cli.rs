@@ -101,6 +101,10 @@ pub struct AmendArgs {
     /// observer's view of a deadline is an `assess`, not an amend.
     #[arg(long, value_name = "WHO")]
     pub by: Option<String>,
+
+    /// Opaque provenance for this amendment, as a JSON object. Never read.
+    #[arg(long, value_name = "JSON")]
+    pub meta: Option<String>,
 }
 
 #[derive(Debug, Args)]

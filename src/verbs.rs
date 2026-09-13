@@ -310,6 +310,7 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
         Some(reason) => Some(non_blank(reason, "--reason")?),
         None => None,
     };
+    let meta = meta_flag(args.meta.as_deref())?;
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
@@ -354,7 +355,7 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
 
     let event = Event::new(
         now.to_string(),
-        EventBody::amend(&args.id, by, until, reason),
+        EventBody::amend(&args.id, by, until, reason).with_meta(meta),
     );
     append(&event)?;
     events.push(event);
@@ -663,6 +664,10 @@ struct HorizonJson<'a> {
     by: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+    /// The `amend` event's own provenance. Absent on the declaration, whose provenance
+    /// is the record's `meta` and is already printed with the record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<&'a Meta>,
 }
 
 #[derive(Serialize)]
@@ -739,6 +744,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             until: horizon.until,
             by: horizon.by,
             reason: horizon.reason,
+            meta: horizon.meta,
         })
         .collect();
 
@@ -811,6 +817,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 "    {}  {}  {}{note}",
                 horizon.ts, horizon.until, horizon.by
             );
+            if let Some(meta) = horizon.meta {
+                println!("      meta     {}", one_line(meta));
+            }
         }
     }
 

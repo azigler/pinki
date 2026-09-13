@@ -19,7 +19,7 @@ use std::str::FromStr;
 use jiff::Timestamp;
 
 use crate::event::{Event, EventBody, Resolution};
-use crate::record::Promise;
+use crate::record::{Meta, Promise};
 
 /// A computed state. §3's first table, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,6 +92,11 @@ pub struct Horizon<'a> {
     /// Why it moved. Always `None` for the declaration — a first deadline needs no
     /// excuse.
     pub reason: Option<&'a str>,
+    /// The amending event's own provenance, carried and never read — the ladder that
+    /// wrote this rung, if it said. Always `None` for the declaration: a promise's
+    /// provenance is the record's `meta`, and duplicating it here would make one fact
+    /// answerable in two places.
+    pub meta: Option<&'a Meta>,
 }
 
 /// Everything the fold knows about one promise.
@@ -245,6 +250,7 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                 by,
                 until,
                 reason,
+                meta,
             } => {
                 // Every amend is kept, in order. The fold neither checks who wrote it
                 // nor whether the promise had already ended — both are the `amend`
@@ -258,6 +264,9 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                         until: until.as_str(),
                         by: by.as_str(),
                         reason: reason.as_deref(),
+                        // Carried, not consulted: `meta` rides the horizon out to the
+                        // read model and never reaches the arithmetic above.
+                        meta: meta.as_ref(),
                     });
             }
             EventBody::Resolve { promise, .. } => {
@@ -303,6 +312,9 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                 until: record.until.as_str(),
                 by: record.by.as_str(),
                 reason: None,
+                // The declaration's provenance is the record's own `meta`, handed back
+                // with the record; the horizon list carries only what each `amend` said.
+                meta: None,
             }];
             horizons.extend(amendments.get(id).into_iter().flatten().copied());
 

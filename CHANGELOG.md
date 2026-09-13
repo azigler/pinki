@@ -55,6 +55,18 @@ tools can depend on them, not merely read them.
   the promise, so it rides the event that performed it. `show --json` returns it under
   `resolution.meta` and each `assessments[].meta`.
 
+- **`meta` on `amend` too**, by the same rule and through the same `--meta` flag:
+  `pinki amend <ID> --until ISO [--meta '<json object>']` writes it last on the amend
+  line, and `show` hands it back under the horizon it belongs to — `horizons[].meta`
+  in `--json`, one line beneath that horizon in the text block. An escalation ladder is
+  the thing that writes most amends and exactly the writer with provenance to carry
+  (which rung, which attempt, under which policy); shipping `amend` as the one
+  meta-less event would have made a ladder project away the half of its row that says
+  who was nudging. The declaration's own horizon carries no `meta` — a promise's
+  provenance is the record's, already handed back with the record. Compatibility is
+  unchanged from what the `amend` event itself already states: a ledger with an amend
+  line in it needs this version or later, whether or not that line carries `meta`.
+
 - Three shape rules at the edge, each exit 2 with nothing appended: `meta` must be an
   object (a consumer has to be able to read the one key it knows and ignore the rest),
   may not be empty (`{}` is provenance offered and left blank — omit it and no key is
