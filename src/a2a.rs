@@ -96,6 +96,7 @@ mod tests {
             on: Some("pnk_0c2b77".into()),
             until: "2026-09-01T17:00:00Z".into(),
             task: Some("a2a-task-9c1f0e".into()),
+            meta: None,
         }
     }
 

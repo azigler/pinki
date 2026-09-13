@@ -202,6 +202,7 @@ mod tests {
                 on: None,
                 until: "2026-09-01T17:00:00Z".into(),
                 task: None,
+                meta: None,
             }),
         )
     }

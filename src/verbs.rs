@@ -12,6 +12,9 @@
 //! read a ledger somebody else wrote, including one that breaks these rules. So:
 //! `--evidence` must be present and non-blank for `--satisfied` (§4), `--until` must
 //! parse as an instant, and a stdin record may not carry a field pinki does not know.
+//! `meta` — §1's one open door — is checked here too, and only here: it must be an
+//! object, it may not be empty, and it is capped at [`MAX_META_BYTES`]. What is
+//! *inside* it is never inspected, by this module or any other.
 //!
 //! ## Exit codes
 //!
@@ -34,7 +37,7 @@ use crate::cli::{
 use crate::event::{Event, EventBody, Resolution};
 use crate::id;
 use crate::ledger;
-use crate::record::Promise;
+use crate::record::{Meta, Promise};
 use crate::state::{fold, PromiseView, State};
 
 /// A command that did not succeed.
@@ -113,6 +116,12 @@ struct Incoming {
     until: String,
     #[serde(default)]
     task: Option<String>,
+    /// Taken as an untyped value rather than a [`Meta`] so that "meta is not an
+    /// object" is refused in pinki's own words, citing §1, exactly as the `--meta`
+    /// flag's is — instead of in serde's, which would say `invalid type` and cite
+    /// nothing.
+    #[serde(default)]
+    meta: Option<serde_json::Value>,
 }
 
 fn promise(args: PromiseArgs) -> Result<(), Fail> {
@@ -127,14 +136,35 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
             on: args.on,
             until: required_flag(args.until, "--until")?,
             task: args.task,
+            meta: match &args.meta {
+                Some(json) => Some(parse_meta(json)?),
+                None => None,
+            },
         },
-        None => read_incoming_from_stdin()?,
+        None => {
+            // The other flags are ignored on this path, which is a wart this change
+            // does not inherit: dropping provenance silently at the seam is the exact
+            // defect §1's open door exists to close, so `--meta` says so instead.
+            if args.meta.is_some() {
+                return Err(Fail::Usage(
+                    "--meta and a record on stdin are two ways to say the same thing, and pinki \
+                     will not guess which one you meant: put `meta` inside the record you are \
+                     piping in (§1). Nothing was appended"
+                        .into(),
+                ));
+            }
+            read_incoming_from_stdin()?
+        }
     };
 
     let text = non_blank(&incoming.promise, "the promise text")?;
     let by = non_blank(&incoming.by, "`by`")?;
     let to = non_blank(&incoming.to, "`to`")?;
     let until = parse_until(&incoming.until)?;
+    let meta = match &incoming.meta {
+        Some(value) => Some(check_meta(value)?),
+        None => None,
+    };
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
@@ -198,9 +228,11 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
             Some(task) => Some(non_blank(&task, "`task`")?),
             None => None,
         },
+        // Attached below, the one way every event type gets it.
+        meta: None,
     };
 
-    let event = Event::new(now.to_string(), EventBody::promise(record));
+    let event = Event::new(now.to_string(), EventBody::promise(record).with_meta(meta));
     append(&event)?;
     events.push(event);
 
@@ -234,7 +266,7 @@ fn read_incoming_from_stdin() -> Result<Incoming, Fail> {
         Fail::Usage(format!(
             "the record on stdin is not a promise: {e}\n\
              expected an object with `promise`, `by`, `to`, `until`, and optionally `id`, `on`, \
-             `task` — no other keys"
+             `task`, `meta` — no other keys"
         ))
     })
 }
@@ -246,6 +278,7 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
     // resolve is malformed whether or not the id exists, and nothing should be
     // appended while we still have a question about what was asked for.
     let outcome = resolution_from(&args)?;
+    let meta = meta_flag(args.meta.as_deref())?;
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
@@ -291,7 +324,7 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
         Outcome::Released(reason) => EventBody::released(&args.id, by, reason),
     };
 
-    let event = Event::new(now.to_string(), body);
+    let event = Event::new(now.to_string(), body.with_meta(meta));
     append(&event)?;
     events.push(event);
 
@@ -389,6 +422,7 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
         Some(note) => Some(non_blank(note, "--note")?),
         None => None,
     };
+    let meta = meta_flag(args.meta.as_deref())?;
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
@@ -402,7 +436,7 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
 
     let event = Event::new(
         now.to_string(),
-        EventBody::violated(&args.id, observer, note),
+        EventBody::violated(&args.id, observer, note).with_meta(meta),
     );
     append(&event)?;
     events.push(event);
@@ -526,6 +560,9 @@ struct ResolutionJson<'a> {
     evidence: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+    /// The resolve event's own provenance, handed back exactly as the log holds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<&'a Meta>,
 }
 
 #[derive(Serialize)]
@@ -535,6 +572,9 @@ struct AssessmentJson<'a> {
     observer: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<&'a str>,
+    /// The assess event's own provenance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<&'a Meta>,
 }
 
 fn show(args: ShowArgs) -> Result<(), Fail> {
@@ -555,6 +595,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 by: resolution.by(),
                 evidence: Some(evidence.as_slice()),
                 reason: None,
+                meta: event.meta(),
             },
             Resolution::Cancelled { reason, .. } => ResolutionJson {
                 kind: resolution.as_str(),
@@ -562,6 +603,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 by: resolution.by(),
                 evidence: None,
                 reason: Some(reason.as_str()),
+                meta: event.meta(),
             },
             Resolution::Released { reason, .. } => ResolutionJson {
                 kind: resolution.as_str(),
@@ -569,6 +611,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 by: resolution.by(),
                 evidence: None,
                 reason: reason.as_deref(),
+                meta: event.meta(),
             },
         })
     });
@@ -581,12 +624,14 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 state,
                 observer,
                 note,
+                meta,
                 ..
             } => Some(AssessmentJson {
                 ts: &event.ts,
                 state,
                 observer,
                 note: note.as_deref(),
+                meta: meta.as_ref(),
             }),
             _ => None,
         })
@@ -614,6 +659,11 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     if let Some(task) = &view.record.task {
         println!("  task         {task}");
     }
+    if let Some(meta) = &view.record.meta {
+        // One line, as JSON, and only when there is one. pinki does not know what any
+        // of these keys mean, so it does not pretend to lay them out.
+        println!("  meta         {}", one_line(meta));
+    }
 
     match &resolution {
         Some(resolution) => {
@@ -628,6 +678,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             }
             if let Some(reason) = resolution.reason {
                 println!("    reason     {reason}");
+            }
+            if let Some(meta) = resolution.meta {
+                println!("    meta       {}", one_line(meta));
             }
         }
         None => println!("  resolution   (unresolved)"),
@@ -646,6 +699,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 "    {}  {}  {}{note}",
                 assessment.ts, assessment.state, assessment.observer
             );
+            if let Some(meta) = assessment.meta {
+                println!("      meta     {}", one_line(meta));
+            }
         }
     }
     Ok(())
@@ -761,6 +817,93 @@ fn parse_until(until: &str) -> Result<String, Fail> {
         })
 }
 
+/// The cap on one `meta` object, in bytes of its compact JSON form.
+///
+/// Generous on purpose — provenance is a handful of short keys, and 8 KiB is two
+/// orders of magnitude more than that — but not unbounded. A ledger line is one line:
+/// §4's "copy the file and you have copied the state" assumes a file a human can read
+/// in `less` and a fold can walk cheaply, and an uncapped open door is how that stops
+/// being true one `--meta "$(cat blob.json)"` at a time. Anything larger belongs
+/// behind a reference *in* `meta` rather than inside it.
+const MAX_META_BYTES: usize = 8 * 1024;
+
+/// Parse a `--meta` flag's text as JSON. Shape is [`check_meta`]'s business.
+fn parse_meta(text: &str) -> Result<serde_json::Value, Fail> {
+    serde_json::from_str(text).map_err(|e| {
+        Fail::Usage(format!(
+            "--meta is not JSON: {e}\n\
+             it takes one object, quoted for your shell — e.g. \
+             --meta '{{\"by\":\"scheduler\",\"ref\":\"run-4131\"}}' (§1). Nothing was appended"
+        ))
+    })
+}
+
+/// Parse and check a `--meta` flag, if one was given.
+fn meta_flag(text: Option<&str>) -> Result<Option<Meta>, Fail> {
+    match text {
+        Some(text) => Ok(Some(check_meta(&parse_meta(text)?)?)),
+        None => Ok(None),
+    }
+}
+
+/// §1's three rules for the one open door — object, non-empty, capped.
+///
+/// What is *inside* is never inspected: nesting, arrays, nulls, keys pinki has never
+/// heard of are all fine, because opaque means opaque. These three are shape, not
+/// content, and each exists for a reason a caller can check for themselves: a
+/// non-object cannot be read key-by-key by a consumer that knows one key; an empty
+/// object is `meta` offered and left empty, the same non-value `--reason "   "` is;
+/// and the cap keeps a ledger line a line.
+fn check_meta(value: &serde_json::Value) -> Result<Meta, Fail> {
+    let object = match value {
+        serde_json::Value::Object(object) => object,
+        serde_json::Value::Null => return Err(not_an_object("null")),
+        serde_json::Value::Bool(_) => return Err(not_an_object("a boolean")),
+        serde_json::Value::Number(_) => return Err(not_an_object("a number")),
+        serde_json::Value::String(_) => return Err(not_an_object("a string")),
+        serde_json::Value::Array(_) => return Err(not_an_object("an array")),
+    };
+
+    if object.is_empty() {
+        return Err(Fail::Usage(
+            "`meta` is an empty object: that is provenance offered and left blank, not provenance \
+             declined. Omit it entirely and no `meta` key is written at all (§1). Nothing was \
+             appended"
+                .into(),
+        ));
+    }
+
+    let size = value.to_string().len();
+    if size > MAX_META_BYTES {
+        return Err(Fail::Usage(format!(
+            "`meta` is {size} bytes of JSON, over the {MAX_META_BYTES}-byte cap (§1): a ledger \
+             line is one line, and pinki will not let the open door turn the log into a blob \
+             store. Put a reference in `meta` and keep the payload where it lives. Nothing was \
+             appended"
+        )));
+    }
+
+    Ok(object.clone())
+}
+
+/// The refusal every non-object `meta` earns, naming what arrived instead.
+fn not_an_object(kind: &str) -> Fail {
+    Fail::Usage(format!(
+        "`meta` is {kind}, and §1 admits only an object there: a reader has to be able to take \
+         the one key it understands and leave the rest alone, which is what makes `meta` safe to \
+         ignore. Nothing was appended"
+    ))
+}
+
+/// `meta` on one line, as JSON, for the human `show` block.
+///
+/// Goes through [`serde_json::Value`]'s `Display`, which is infallible — so a print
+/// path never has to decide what to do with an encoding error it cannot get. The
+/// clone is bounded: this runs once per printed block, on a value the edge capped.
+fn one_line(meta: &Meta) -> String {
+    serde_json::Value::Object(meta.clone()).to_string()
+}
+
 /// Pretty-printed JSON, straight to a string so struct field order survives.
 fn encode<T: Serialize>(value: &T) -> Result<String, Fail> {
     serde_json::to_string_pretty(value)
@@ -836,6 +979,7 @@ mod tests {
             evidence: Vec::new(),
             reason: None,
             by: None,
+            meta: None,
         };
         let err = resolution_from(&args).unwrap_err();
         assert_eq!(err.code(), 2);
@@ -852,6 +996,7 @@ mod tests {
             evidence: vec!["   ".into()],
             reason: None,
             by: None,
+            meta: None,
         };
         assert_eq!(resolution_from(&args).unwrap_err().code(), 2);
     }
@@ -866,6 +1011,7 @@ mod tests {
             evidence: Vec::new(),
             reason: None,
             by: None,
+            meta: None,
         };
         assert_eq!(resolution_from(&bare).unwrap_err().code(), 2);
 
@@ -887,11 +1033,97 @@ mod tests {
             evidence: Vec::new(),
             reason: None,
             by: None,
+            meta: None,
         };
         assert!(matches!(
             resolution_from(&args).unwrap(),
             Outcome::Released(None)
         ));
+    }
+
+    // ------------------------------------------------------------------ meta
+
+    fn value(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("bad test JSON {json}: {e}"))
+    }
+
+    #[test]
+    fn meta_that_is_not_an_object_is_malformed_whatever_it_is() {
+        for json in ["null", "true", "3", r#""a string""#, r#"[{"by":"x"}]"#] {
+            let err = check_meta(&value(json)).unwrap_err();
+            assert_eq!(err.code(), 2, "{json}");
+            let message = err.to_string();
+            assert!(message.contains("§1"), "{json}: {message}");
+            assert!(
+                message.contains("Nothing was appended"),
+                "{json}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_what_arrived_instead_of_an_object() {
+        for (json, kind) in [
+            ("null", "null"),
+            ("true", "a boolean"),
+            ("3", "a number"),
+            (r#""x""#, "a string"),
+            ("[]", "an array"),
+        ] {
+            let message = check_meta(&value(json)).unwrap_err().to_string();
+            assert!(
+                message.contains(kind),
+                "{json} should be called {kind}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_meta_object_is_malformed_rather_than_stored() {
+        // Same rule as `--reason "   "`: offered and left blank is not declined.
+        let err = check_meta(&value("{}")).unwrap_err();
+        assert_eq!(err.code(), 2);
+        assert!(err.to_string().contains("empty object"), "{err}");
+    }
+
+    #[test]
+    fn meta_is_capped_and_the_message_says_by_how_much() {
+        let under = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_META_BYTES - 20));
+        let object = check_meta(&value(&under)).expect("just under the cap is fine");
+        assert_eq!(object.len(), 1);
+
+        let over = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_META_BYTES));
+        let err = check_meta(&value(&over)).unwrap_err();
+        assert_eq!(err.code(), 2);
+        let message = err.to_string();
+        assert!(message.contains(&MAX_META_BYTES.to_string()), "{message}");
+        assert!(message.contains("Nothing was appended"), "{message}");
+    }
+
+    #[test]
+    fn nesting_is_never_a_reason_to_refuse_meta() {
+        // Opaque means opaque: pinki checks the shape of the door, not the room.
+        let object = check_meta(&value(
+            r#"{"a":{"b":{"c":[1,2,{"d":null}]}},"e":false,"f":1.5}"#,
+        ))
+        .expect("nested meta is fine");
+        assert_eq!(object.len(), 3);
+    }
+
+    #[test]
+    fn a_meta_flag_that_is_not_json_is_a_usage_error() {
+        let err = meta_flag(Some("by=offboard")).unwrap_err();
+        assert_eq!(err.code(), 2);
+        assert!(err.to_string().contains("--meta is not JSON"), "{err}");
+        assert!(meta_flag(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn meta_renders_on_one_line_for_the_human_block() {
+        let object = check_meta(&value(r#"{"by":"offboard","attempt":2}"#)).unwrap();
+        let line = one_line(&object);
+        assert_eq!(line, r#"{"attempt":2,"by":"offboard"}"#);
+        assert!(!line.contains('\n'), "{line}");
     }
 
     #[test]

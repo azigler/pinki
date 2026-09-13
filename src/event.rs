@@ -23,10 +23,22 @@
 //! It reads correctly in both places — "the promise" is the text when you are
 //! speaking it and the referent when you are pointing at it — and the log is the
 //! interoperability surface, so it is not ours to tidy.
+//!
+//! ## `meta` rides every event, and none of them are read
+//!
+//! §1's open door is not only the record's. A `resolve` and an `assess` carry their
+//! own provenance in an adopting system — which component resolved this, on whose
+//! behalf, citing what — so every event type may carry a `meta` object, attached the
+//! one way, through [`EventBody::with_meta`], and always serialized last.
+//!
+//! It is opaque everywhere: [`crate::state`]'s fold never looks at it, so no `meta`
+//! anywhere in a ledger can change a computed state. §4 — "the log is the whole
+//! system" — is what this is in service of: an adopter's row survives the seam
+//! whole, instead of arriving as the seven fields pinki happens to do arithmetic on.
 
 use serde::{Deserialize, Serialize};
 
-use crate::record::Promise;
+use crate::record::{Meta, Promise};
 
 /// The asserted state §3 gives us today. Assessments are speech acts, so the field
 /// is a plain string rather than a closed enum: pinki *publishes* judgments and never
@@ -41,7 +53,7 @@ pub const VIOLATED: &str = "violated";
 /// event timestamps — only `until` against an injected `now` — so parsing them would
 /// buy nothing and would let a ledger line become unreadable over a field nothing
 /// reads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub ts: String,
     #[serde(flatten)]
@@ -73,16 +85,25 @@ impl Event {
             _ => None,
         }
     }
+
+    /// The opaque provenance this event carries, if any. Nothing in pinki reads what
+    /// is *inside* it — this exists so the read model can hand it back.
+    pub fn meta(&self) -> Option<&Meta> {
+        match &self.body {
+            EventBody::Promise(p) => p.meta.as_ref(),
+            EventBody::Resolve { meta, .. } | EventBody::Assess { meta, .. } => meta.as_ref(),
+        }
+    }
 }
 
 /// The body of an event, internally tagged on `type` so it flattens into [`Event`]
 /// with `ts` ahead of it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum EventBody {
     /// Speaks a promise into existence. The body *is* the §1 record, verbatim — one
     /// definition of the field set, so the log and the A2A `metadata` block cannot
-    /// drift apart.
+    /// drift apart. Its `meta`, when it has one, is the record's.
     Promise(Promise),
     /// Ends a promise.
     Resolve {
@@ -90,6 +111,9 @@ pub enum EventBody {
         promise: String,
         #[serde(flatten)]
         resolution: Resolution,
+        /// Opaque provenance for the act of resolving — never for the promise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Meta>,
     },
     /// Publishes an assessment. Never terminal: §4 — "an assessed promise stays
     /// exactly as open as it was."
@@ -100,10 +124,27 @@ pub enum EventBody {
         observer: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// Opaque provenance for the act of assessing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Meta>,
     },
 }
 
 impl EventBody {
+    /// Attach opaque provenance — the one way `meta` gets onto any event.
+    ///
+    /// A `promise` event's `meta` is the record's field, and a `resolve`/`assess`
+    /// event's is its own; one method rather than three so "every event may carry
+    /// meta" is a single statement in the code as well as in §4.
+    pub fn with_meta(mut self, meta: Option<Meta>) -> Self {
+        match &mut self {
+            EventBody::Promise(record) => record.meta = meta,
+            EventBody::Resolve { meta: slot, .. } | EventBody::Assess { meta: slot, .. } => {
+                *slot = meta
+            }
+        }
+        self
+    }
     /// A `promise` event body.
     pub fn promise(record: Promise) -> Self {
         EventBody::Promise(record)
@@ -122,6 +163,7 @@ impl EventBody {
                 by: by.into(),
                 evidence,
             },
+            meta: None,
         }
     }
 
@@ -137,6 +179,7 @@ impl EventBody {
                 by: by.into(),
                 reason: reason.into(),
             },
+            meta: None,
         }
     }
 
@@ -153,6 +196,7 @@ impl EventBody {
                 by: by.into(),
                 reason,
             },
+            meta: None,
         }
     }
 
@@ -167,6 +211,7 @@ impl EventBody {
             state: VIOLATED.to_string(),
             observer: observer.into(),
             note,
+            meta: None,
         }
     }
 }
@@ -182,6 +227,9 @@ impl EventBody {
 /// Modelling the payload per outcome is what makes the §4 requirements
 /// unconstructible to violate: there is no `Satisfied` without an `evidence` list and
 /// no `Cancelled` without a reason.
+///
+/// This one keeps `Eq` — it holds no `meta` and never will. `meta` belongs to the
+/// *event*, not to the outcome: "how it ended" is §4's closed table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "as", rename_all = "lowercase")]
 pub enum Resolution {
@@ -235,7 +283,12 @@ mod tests {
             on: Some("pnk_0c2b77".into()),
             until: "2026-09-01T17:00:00Z".into(),
             task: None,
+            meta: None,
         }
+    }
+
+    fn meta(json: &str) -> Meta {
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("bad test meta {json}: {e}"))
     }
 
     #[test]
@@ -364,5 +417,107 @@ mod tests {
         assert_eq!(events[1].resolution().unwrap().by(), "…/reviewer");
         assert_eq!(events[2].subject(), "pnk_88de10");
         assert!(events[2].resolution().is_none());
+    }
+
+    // ------------------------------------------------------------------ meta
+
+    #[test]
+    fn with_meta_attaches_to_every_event_type_and_serializes_last() {
+        let provenance = meta(r#"{"by":"offboard","ref":"dotfiles-6"}"#);
+        let tail = r#""meta":{"by":"offboard","ref":"dotfiles-6"}}"#;
+
+        let p = Event::new(
+            "2026-08-28T20:14:03Z",
+            EventBody::promise(record()).with_meta(Some(provenance.clone())),
+        );
+        let text = serde_json::to_string(&p).unwrap();
+        assert!(text.ends_with(tail), "{text}");
+        assert!(text.starts_with(r#"{"ts":"2026-08-28T20:14:03Z","type":"promise""#));
+
+        let r = Event::new(
+            "2026-09-01T16:02:11Z",
+            EventBody::satisfied("pnk_4f3a91", "…/reviewer", vec!["sha:abc".into()])
+                .with_meta(Some(provenance.clone())),
+        );
+        let text = serde_json::to_string(&r).unwrap();
+        assert_eq!(
+            text,
+            r#"{"ts":"2026-09-01T16:02:11Z","type":"resolve","promise":"pnk_4f3a91","as":"satisfied","by":"…/reviewer","evidence":["sha:abc"],"meta":{"by":"offboard","ref":"dotfiles-6"}}"#
+        );
+
+        let a = Event::new(
+            "2026-09-02T09:00:00Z",
+            EventBody::violated("pnk_88de10", "…/author", None).with_meta(Some(provenance)),
+        );
+        let text = serde_json::to_string(&a).unwrap();
+        assert_eq!(
+            text,
+            r#"{"ts":"2026-09-02T09:00:00Z","type":"assess","promise":"pnk_88de10","state":"violated","observer":"…/author","meta":{"by":"offboard","ref":"dotfiles-6"}}"#
+        );
+    }
+
+    #[test]
+    fn an_event_without_meta_writes_no_meta_key() {
+        for ev in [
+            Event::new("2026-08-28T20:14:03Z", EventBody::promise(record())),
+            Event::new(
+                "2026-09-01T16:02:11Z",
+                EventBody::satisfied("pnk_4f3a91", "…/reviewer", vec!["sha:abc".into()]),
+            ),
+            Event::new(
+                "2026-09-01T16:02:11Z",
+                EventBody::cancelled("pnk_4f3a91", "…/reviewer", "withdrawn"),
+            ),
+            Event::new(
+                "2026-09-01T16:02:11Z",
+                EventBody::released("pnk_4f3a91", "…/author", None),
+            ),
+            Event::new(
+                "2026-09-02T09:00:00Z",
+                EventBody::violated("pnk_88de10", "…/author", None),
+            ),
+        ] {
+            let text = serde_json::to_string(&ev).unwrap();
+            assert!(!text.contains("meta"), "{text}");
+            assert!(ev.meta().is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn meta_survives_a_round_trip_on_every_event_type() {
+        let provenance = meta(r#"{"attempt":2,"policy":{"nudge":["t-24h"]},"seat":"works"}"#);
+        for ev in [
+            Event::new(
+                "2026-08-28T20:14:03Z",
+                EventBody::promise(record()).with_meta(Some(provenance.clone())),
+            ),
+            Event::new(
+                "2026-09-01T16:02:11Z",
+                EventBody::satisfied("pnk_4f3a91", "…/reviewer", vec!["sha:abc".into()])
+                    .with_meta(Some(provenance.clone())),
+            ),
+            Event::new(
+                "2026-09-01T16:02:11Z",
+                EventBody::cancelled("pnk_4f3a91", "…/reviewer", "withdrawn")
+                    .with_meta(Some(provenance.clone())),
+            ),
+            Event::new(
+                "2026-09-01T16:02:11Z",
+                EventBody::released("pnk_4f3a91", "…/author", Some("fine by me".into()))
+                    .with_meta(Some(provenance.clone())),
+            ),
+            Event::new(
+                "2026-09-02T09:00:00Z",
+                EventBody::violated("pnk_88de10", "…/author", None)
+                    .with_meta(Some(provenance.clone())),
+            ),
+        ] {
+            let text = serde_json::to_string(&ev).unwrap();
+            let back: Event = serde_json::from_str(&text).unwrap_or_else(|e| {
+                panic!("failed to read back {text}: {e}");
+            });
+            assert_eq!(ev, back, "round-trip changed {text}");
+            assert_eq!(back.meta(), Some(&provenance), "meta was lost from {text}");
+        }
     }
 }

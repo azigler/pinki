@@ -380,6 +380,7 @@ mod tests {
                 on: on.map(str::to_string),
                 until: until.into(),
                 task: None,
+                meta: None,
             }),
         )
     }
