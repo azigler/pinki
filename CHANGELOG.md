@@ -11,6 +11,7 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+
 ### Added
 
 - **The `amend` event, and the `amend` verb** — a deadline that moves, without a
@@ -40,6 +41,60 @@ tools can depend on them, not merely read them.
   rewritten: `first declaration wins` is unchanged, and a fold that skips `amend`
   events still answers what it answered before — the declared horizon.
 
+- **`--id` accepts an id you already have.** It used to refuse anything that was not
+  `pnk_` plus six lowercase hex digits, which made the one affordance that looks like
+  "carry your ledger over" not be one. A supplied id is now opaque: any non-blank
+  string with no whitespace, no control characters and no invisible characters, up to
+  128 characters. Minting
+  is untouched — leave `--id` off and you get a `pnk_` id exactly as before — and the
+  stdin record's `"id"` takes the same forms, by the same code. Closes
+  [#5](https://github.com/azigler/pinki/issues/5).
+
+  Two consequences, both from the issue. **Adoption**: an arriving ledger keeps the
+  ids other systems already reference, instead of needing a permanent side table
+  mapping them to pinki's. **The join**: DESIGN.md § 7 offers the ledger join as
+  pinki's answer to commitment misalignment, and it is keyed by promise id — so it
+  now works between parties who did not both mint here, which is the only version of
+  it that was ever worth much.
+
+  What did **not** change, on purpose: there is no `external_id` field. Two id fields
+  is two ways to name one promise and a decision, per reader, about which one the `on`
+  edge and the A2A `metadata` block key on. One opaque field is the smaller thing that
+  works. And uniqueness is unchanged and non-negotiable — declaring an id the ledger
+  already declares is refused with § 4's first-declaration-wins message whether it was
+  minted or supplied, which is the collision check the six-hex space never really had.
+
+- **An id may not contain an invisible character.** A supplied id holding a character
+  with the Unicode **`Default_Ignorable_Code_Point`** property — zero-width spaces and
+  joiners, the bidi controls, variation selectors, tag characters, soft hyphen, the
+  Hangul fillers — is refused (exit 2, nothing appended, message citing § 1 and naming
+  the code point, which is the only way to see a character that renders as nothing).
+
+  It is its own rule because neither of the other two catches it: U+200B ZERO WIDTH
+  SPACE is `White_Space=No` in Unicode despite its name, and none of these are control
+  characters, so `char::is_whitespace()` and `char::is_control()` are both `false`.
+  Without the rule, two ids that are **not equal** can be **indistinguishable** — in
+  `pinki ls`, in a terminal, in a code review, and to whoever is deciding whether § 7's
+  join matched. An identifier whose equality the eye cannot check is not a handle.
+
+  Non-ASCII is otherwise entirely fine, and tested: `υπόσχεση-91` and `約束-91` are
+  accepted. This is a rule about invisibility, not about script. The set is Unicode
+  16.0.0's (`DerivedCoreProperties.txt`), carried as a 17-range table in `src/id.rs`
+  rather than a new dependency — Cargo.toml's list is DESIGN.md § 7's no-network
+  invariant, so a crate has to earn itself, and this one would buy seventeen lines.
+
+- **`pnk_` is reserved for minted ids.** A supplied id wearing that prefix without
+  being six lowercase hex digits is refused (exit 2, nothing appended). The
+  reservation keeps "was this minted here?" answerable from the id alone, which is
+  what lets an unknown-id error distinguish a typo — `pnk_bogus` could never have
+  been declared — from a plain lookup miss. An adopter gives up nothing: an id space
+  that already starts with `pnk_` is pinki's own.
+
+- **The unknown-id hint no longer calls a foreign id malformed.** `pinki show bogus`
+  used to add "(and `bogus` is not even a well-formed pinki id)". Since § 1 now admits
+  a caller's own id, that sentence is false — `bogus` is a perfectly declarable id —
+  so the hint fires only for the reserved-prefix case above.
+
 ### Compatibility
 
 - **A ledger containing an `amend` line requires this version or later. v0.1.0 refuses
@@ -61,6 +116,43 @@ tools can depend on them, not merely read them.
   handed a ledger with no amends in it is unaffected. The forward-tolerance above is
   the fix going forward, and it can only ever help the *next* event type — it cannot
   reach backwards into a binary already installed.
+
+- **This one is not breaking, and that is a measured claim rather than a hope.** A
+  ledger containing foreign ids is read by **v0.1.0** — the whole file, every verb —
+  because nothing about the record's *shape* changed: the `promise` event carries the
+  same keys in the same order, and v0.1.0's `--id` refusal was a check on **input**,
+  never on what it reads back. Observed against the v0.1.0 binary, on a ledger this
+  build wrote:
+
+  ```console
+  $ pinki --version
+  pinki 0.1.0
+  $ PINKI_LEDGER=./foreign.jsonl pinki ls --all
+  pr-20260906203134-225e24cd  satisfied  2099-01-01T00:00:00Z  reviewer -> author   hand back a reviewed schema
+  pnk_cfb64b                  detached   2099-01-02T00:00:00Z  author -> publisher  ship it
+  $ echo $?
+  0
+  ```
+
+  `show`, `ls --json` and `a2a task` on the foreign id all succeed on v0.1.0 too, and
+  so do `resolve` and `assess` against it — those verbs never validated an id's shape,
+  they only looked it up. The single thing v0.1.0 cannot do with a foreign id is
+  **declare** one: `pinki promise --id pr-20260906203134-225e24cd` still exits 2
+  there, which is issue #5 itself.
+
+  So the upgrade is one-directional in exactly one place: a ledger with foreign ids in
+  it can be read by an old reader and *appended to* by an old reader; it just cannot
+  have had that first line written by one.
+
+- **The invisible-character rule is a check on input too, and worth saying plainly.**
+  It refuses a *declaration*; it does not retro-validate a ledger. A row whose id
+  already holds an invisible character — written by another implementation, by a hand
+  edit, or by an earlier build of this branch — is still read, shown, resolved and
+  assessed by **this** version, because no read path re-checks an id's shape. An old
+  reader reads it too, for the same reason it reads any other foreign id. The
+  asymmetry is therefore the same one as above and no bigger: an id this version will
+  not let you declare is an id both old and new readers will still show you. It is
+  your ledger; nothing here rewrites or hides a line you already have.
 
 ### Refused, on purpose
 

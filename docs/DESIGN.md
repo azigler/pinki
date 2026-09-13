@@ -60,6 +60,66 @@ Three deliberate absences:
 - **No priority, no tags, no assignee, no project.** Those are your orchestrator's
   business. pinki holds the obligation and nothing else.
 
+### The id is opaque, and that cuts both ways
+
+`id` says *opaque* in the table above, and pinki means it about its own ids too.
+There is exactly one id field, and it holds one of two things:
+
+- **A minted id**, when you do not say otherwise: `pnk_` plus exactly six lowercase
+  hex digits. Short and typeable, and minted by asking the ledger which ids are
+  already spoken for rather than by trusting the size of the space.
+- **An id you brought with you**, via `pinki promise --id` (or `"id"` in the record
+  on stdin): any non-blank string with no whitespace, no control characters and no
+  invisible characters, up to 128 characters.
+
+The permissiveness is the point. Anyone arriving with an existing obligation ledger
+has an id space that other systems already reference, and an `--id` that refuses it
+turns adoption into a permanent side table mapping their ids to ours — a second copy
+of the identity of every promise, maintained forever, for no gain. The join in § 7
+wants the same thing from the other direction: it is keyed by promise id, so two
+parties who did not both mint here can only key it if pinki will hold the key they
+share.
+
+Four rules, and they are the only ones:
+
+- **No whitespace, no control characters, and not blank.** The id is a column in
+  `pinki ls`, the first field of the tab-separated line every mutating verb prints,
+  and the key two ledgers are joined on. Those are the uses; these are the rules that
+  keep them working. Nothing else about the shape is pinki's business.
+- **No invisible characters.** A character with the Unicode
+  **`Default_Ignorable_Code_Point`** property — zero-width spaces and joiners, the
+  bidi controls, variation selectors, tag characters, soft hyphen, the Hangul fillers
+  — is refused. This is its own rule because neither of the two above catches it:
+  U+200B ZERO WIDTH SPACE is `White_Space=No` despite the name, and none of these are
+  control characters. Without it, two ids that are **not equal** can be
+  **indistinguishable** — in `pinki ls`, in a terminal, in a code review, and to
+  whoever is deciding whether the join in § 7 matched. An identifier whose equality
+  the eye cannot check is not a handle. Non-ASCII is otherwise entirely fine: this is
+  a rule about invisibility, not about script. (The set is Unicode 16.0.0's, carried
+  as a 17-range table in `src/id.rs`; a later Unicode version that adds to the
+  property needs that table updated.)
+- **At most 128 characters.** A bound rather than a taste — a UUID is 36, a URN
+  comfortably under 100 — chosen so a ledger line stays something a human reads with
+  `less`. It is not a claim that 129 would be meaningless; it is a refusal to let the
+  field grow without anyone deciding it should.
+- **Unique within the ledger.** Declaring an id the ledger already declares is
+  refused, minted or supplied alike: that is § 4's first-declaration-wins guard, and
+  it does not care which space the id came from. The six-hex space never had a
+  collision check worth the name; this is it.
+
+`pnk_` is reserved for the ids pinki mints, so a supplied id wearing that prefix
+without being six lowercase hex digits is refused. That reservation is small and it
+buys something specific: "was this minted here?" stays an answerable question from
+the id alone, which is what lets an unknown-id error tell a typo (`pnk_bogus` could
+never have been declared) apart from a plain lookup miss (`pr-2026…` simply is not in
+this file). An adopter loses nothing by it — an id space that already begins `pnk_`
+is pinki's own.
+
+There is deliberately **no `external_id` field**. Two id fields is two ways to name
+one promise, and every reader then has to decide which one the `on` edge, the join,
+and the A2A `metadata` block key on. One field, opaque, is the smaller thing that
+works.
+
 ### `until` is required, and that is opinionated
 
 It is the one place pinki insists. A promise without a deadline cannot be checked
@@ -270,7 +330,7 @@ no daemon, no server, no database.
 
 ```
 pinki promise "hand back a reviewed schema" \
-      --by reviewer --to author --until 2026-09-01T17:00Z [--on pnk_0c2b77]
+      --by reviewer --to author --until 2026-09-01T17:00Z [--on pnk_0c2b77] [--id ID]
 
 pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed late"]
 
@@ -297,6 +357,11 @@ first, once there is more than one.
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
 explicit one that disagrees. `--reason` is encouraged, not required: an escalation
 ladder amends on a clock and has one reason for every rung.
+
+`promise` mints an id unless `--id` gives it one, and an id you give it is opaque —
+§ 1's id policy, enforced where the input arrives. Every other verb takes whatever id
+the ledger holds; none of them re-checks its shape, because an id that could be
+declared has to be resolvable.
 
 The two `a2a` verbs **only write JSON to stdout**. They do not call anything. You
 pipe them into whatever A2A client you already run — that is the whole integration
@@ -340,6 +405,13 @@ promise id, two parties' ledgers can be **joined**, and the diff *is* the
 misalignment — visible, enumerable, and small enough to talk about. Making a
 disagreement computable is not the same as resolving it, and pinki claims only the
 first.
+
+That join is only as available as the key is. It works between two parties who both
+run pinki because both ledgers carry ids from the same space; it works between a
+pinki ledger and a party who never heard of pinki **only if pinki will hold their
+id** — which is why § 1's id is opaque and `--id` takes whatever you already call the
+thing. A tool that insisted on minting the key would have offered a join that
+requires the disagreement to be between two copies of itself.
 
 **The intermediary problem.** Burgess's objection to any third party in an
 obligation is structural, not fixable by good intentions: an intermediary that sits
