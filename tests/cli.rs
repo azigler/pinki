@@ -439,12 +439,158 @@ fn an_explicit_id_is_recorded_instead_of_a_minted_one() {
     assert_eq!(event["id"], "pnk_4f3a91");
 }
 
+// --------------------------------------------------------------- foreign ids
+//
+// §1: an id a caller brings is opaque. These drive the real id space that motivated
+// issue #5 — a fleet with ~584 rows keyed `pr-<stamp>-<hash>`, referenced from other
+// systems — through every verb that takes an id, because an id that can be declared
+// and then not resolved is worse than one that was refused up front.
+
+/// A real-shaped id from the fleet that reported #5. Nothing about it is a pinki id.
+const FOREIGN: &str = "pr-20260906203134-225e24cd";
+
 #[test]
-fn an_explicit_id_that_is_not_well_formed_is_a_usage_error() {
+fn a_foreign_id_round_trips_through_every_verb_that_takes_one() {
     let scratch = Scratch::new();
+    let declared = scratch.run(&[
+        "promise",
+        "hand back a reviewed schema",
+        "--by",
+        "reviewer",
+        "--to",
+        "author",
+        "--until",
+        FUTURE,
+        "--id",
+        FOREIGN,
+        "--task",
+        "a2a-task-9c1f0e",
+    ]);
+    declared.expect(0);
+    assert_eq!(declared.id(), FOREIGN);
+    assert_eq!(declared.state(), "detached");
+
+    // On the line, verbatim — pinki neither rewrites nor decorates it. And the line is
+    // the same *shape* it has always been: §1 gained no `external_id`, so the keys are
+    // exactly the ones a minted id writes, which is why a v0.1.0 reader can still read
+    // this file (see CHANGELOG's Compatibility note).
+    let event: serde_json::Value = serde_json::from_str(&scratch.lines()[0]).expect("valid JSON");
+    assert_eq!(event["id"], FOREIGN);
+    let keys: Vec<&str> = event
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    // serde_json sorts an object's keys on the way in, so this is the key *set*; the
+    // on-disk field order is asserted by `src/record.rs`'s own round-trip test.
+    assert_eq!(
+        keys,
+        ["by", "id", "promise", "task", "to", "ts", "type", "until"],
+        "a supplied id adds no field and removes none"
+    );
+
+    // ls, in both forms.
+    let table = scratch.run(&["ls"]);
+    table.expect(0);
+    assert!(table.stdout.contains(FOREIGN), "{:?}", table.stdout);
+    let rows = scratch.run(&["ls", "--json"]);
+    rows.expect(0);
+    let rows = rows.json();
+    assert_eq!(rows[0]["id"], FOREIGN);
+    assert_eq!(rows[0]["state"], "detached");
+
+    // show, in both forms.
+    let shown = scratch.run(&["show", FOREIGN]);
+    shown.expect(0);
+    assert!(shown.stdout.starts_with(FOREIGN), "{:?}", shown.stdout);
+    let detail = scratch.run(&["show", FOREIGN, "--json"]);
+    detail.expect(0);
+    assert_eq!(detail.json()["id"], FOREIGN);
+
+    // The A2A metadata block carries it unchanged — which is the point of #5's second
+    // consequence: two parties join on this key or they do not join at all.
+    let block = scratch.run(&["a2a", "task", FOREIGN]);
+    block.expect(0);
+    let block = block.json();
+    let (_, record) = block.as_object().expect("an object").iter().next().unwrap();
+    assert_eq!(record["id"], FOREIGN);
+
+    // assess, then resolve. Both name the id, neither re-validates its shape.
+    scratch
+        .run(&["assess", FOREIGN, "--violated", "--observer", "author"])
+        .expect(0);
+    let resolved = scratch.run(&[
+        "resolve",
+        FOREIGN,
+        "--satisfied",
+        "--evidence",
+        "https://example.org/reviews/91",
+    ]);
+    resolved.expect(0);
+    assert_eq!(resolved.state(), "satisfied");
+    assert_eq!(state_of(&scratch, FOREIGN), "satisfied");
+
+    // And it is a legal antecedent, so a foreign id joins the graph too.
+    let dependent = scratch.run(&[
+        "promise",
+        "ship it",
+        "--by",
+        "author",
+        "--to",
+        "publisher",
+        "--until",
+        FUTURE,
+        "--on",
+        FOREIGN,
+    ]);
+    dependent.expect(0);
+    assert_eq!(
+        dependent.state(),
+        "detached",
+        "the antecedent is satisfied, so the dependent detaches"
+    );
+    assert_eq!(
+        dependent.stderr, "",
+        "a declared antecedent earns no warning: {:?}",
+        dependent.stderr
+    );
+}
+
+#[test]
+fn a_foreign_id_declared_twice_is_refused_like_any_other() {
+    let scratch = Scratch::new();
+    let declare = |text: &str| {
+        scratch.run(&[
+            "promise", text, "--by", "author", "--to", "reviewer", "--until", FUTURE, "--id",
+            FOREIGN,
+        ])
+    };
+    declare("send the draft schema").expect(0);
+
+    let run = declare("send a different schema");
+    run.expect(1);
+    assert!(
+        run.stderr.contains("already declared"),
+        "§4's first-declaration-wins guard does not care which id space this came \
+         from: {:?}",
+        run.stderr
+    );
+    assert_eq!(scratch.lines().len(), 1, "the first declaration stands");
+}
+
+#[test]
+fn a_supplied_id_that_collides_with_a_minted_one_is_refused() {
+    let scratch = Scratch::new();
+    // The minted id is random, so the only deterministic way to collide with one is to
+    // mint it first and then hand it back. That is also the real case: a caller who
+    // read an id out of `ls` and passed it to `--id` by mistake.
+    let minted = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    assert!(is_minted_id(&minted));
+
     let run = scratch.run(&[
         "promise",
-        "send the draft schema",
+        "send a different schema",
         "--by",
         "author",
         "--to",
@@ -452,15 +598,214 @@ fn an_explicit_id_that_is_not_well_formed_is_a_usage_error() {
         "--until",
         FUTURE,
         "--id",
-        "promise-1",
+        &minted,
     ]);
+    run.expect(1);
+    assert!(run.stderr.contains("already declared"), "{:?}", run.stderr);
+    assert_eq!(scratch.lines().len(), 1);
+}
+
+#[test]
+fn a_supplied_id_wearing_the_minted_prefix_must_be_a_minted_one() {
+    let scratch = Scratch::new();
+    // `pnk_` stays reserved so `is_well_formed` keeps meaning "pinki minted this".
+    for id in ["pnk_promise", "pnk_4f3a9", "pnk_4F3A91", "pnk_"] {
+        let run = scratch.run(&[
+            "promise",
+            "send the draft schema",
+            "--by",
+            "author",
+            "--to",
+            "reviewer",
+            "--until",
+            FUTURE,
+            "--id",
+            id,
+        ]);
+        run.expect(2);
+        assert!(
+            run.stderr.contains("reserved"),
+            "the refusal should name the reservation: {:?}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("six lowercase hex digits"),
+            "and say what a minted id looks like: {:?}",
+            run.stderr
+        );
+        assert!(scratch.lines().is_empty(), "nothing may be appended: {id}");
+    }
+
+    // An id merely near the prefix is nobody's business but the caller's.
+    scratch
+        .run(&[
+            "promise",
+            "send the draft schema",
+            "--by",
+            "author",
+            "--to",
+            "reviewer",
+            "--until",
+            FUTURE,
+            "--id",
+            "pnk-4f3a91",
+        ])
+        .expect(0);
+}
+
+#[test]
+fn a_supplied_id_that_is_not_usable_as_a_handle_is_a_usage_error() {
+    let scratch = Scratch::new();
+    // Blank, whitespace-only, whitespace inside, and a control character. Each is
+    // malformed input — exit 2, nothing appended.
+    for id in ["", "   ", "two words", "tab\there", "bel\u{7}here"] {
+        let run = scratch.run(&[
+            "promise",
+            "send the draft schema",
+            "--by",
+            "author",
+            "--to",
+            "reviewer",
+            "--until",
+            FUTURE,
+            "--id",
+            id,
+        ]);
+        run.expect(2);
+        assert!(
+            run.stderr.contains("§1"),
+            "the refusal cites the rule: {:?}",
+            run.stderr
+        );
+        assert!(
+            scratch.lines().is_empty(),
+            "nothing may be appended for {id:?}"
+        );
+    }
+}
+
+#[test]
+fn a_supplied_id_may_not_hide_an_invisible_character() {
+    // §1: an id is a handle you can read, type and compare by eye. A character with
+    // the Unicode `Default_Ignorable_Code_Point` property renders as nothing, so two
+    // ids that are not equal can be indistinguishable in `ls`, in a terminal, and in
+    // a code review — and the id is the key §7's join is made on. Neither
+    // `char::is_whitespace` nor `char::is_control` is true of any of them (that is
+    // the gap this test exists for), so the property has to be its own rule.
+    let scratch = Scratch::new();
+    scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    let before = fs::read(scratch.ledger()).expect("a ledger to compare against");
+
+    for (id, what) in [
+        ("pr-9\u{200B}1", "U+200B ZERO WIDTH SPACE"),
+        ("pr-9\u{FEFF}1", "U+FEFF ZERO WIDTH NO-BREAK SPACE (BOM)"),
+        ("pr-9\u{2060}1", "U+2060 WORD JOINER"),
+        ("pr-9\u{E0001}1", "U+E0001 LANGUAGE TAG"),
+    ] {
+        let run = scratch.run(&[
+            "promise",
+            "send a different schema",
+            "--by",
+            "author",
+            "--to",
+            "reviewer",
+            "--until",
+            FUTURE,
+            "--id",
+            id,
+        ]);
+        run.expect(2);
+        assert!(
+            run.stderr.contains("§1"),
+            "the refusal cites the rule for {what}: {:?}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("Default_Ignorable_Code_Point"),
+            "the refusal names the property for {what}: {:?}",
+            run.stderr
+        );
+        assert_eq!(
+            fs::read(scratch.ledger()).expect("the ledger is still there"),
+            before,
+            "the ledger must be byte-identical after refusing {what}"
+        );
+    }
+
+    // The positive control, and the reason this is a property rather than a ban on
+    // non-ASCII: an id in another script holds nothing invisible and is fine.
+    for id in ["υπόσχεση-91", "約束-91", "promesse-91"] {
+        let run = scratch.run(&[
+            "promise",
+            "ship it",
+            "--by",
+            "author",
+            "--to",
+            "publisher",
+            "--until",
+            FUTURE,
+            "--id",
+            id,
+        ]);
+        run.expect(0);
+        assert_eq!(run.id(), id);
+    }
+}
+
+#[test]
+fn a_supplied_id_is_bounded_at_128_characters() {
+    let scratch = Scratch::new();
+    let declare = |id: &str| {
+        scratch.run(&[
+            "promise",
+            "send the draft schema",
+            "--by",
+            "author",
+            "--to",
+            "reviewer",
+            "--until",
+            FUTURE,
+            "--id",
+            id,
+        ])
+    };
+
+    let over = "x".repeat(129);
+    let run = declare(&over);
     run.expect(2);
-    assert!(
-        run.stderr.contains("six lowercase hex digits"),
-        "the error should say what a pinki id looks like: {:?}",
-        run.stderr
-    );
+    assert!(run.stderr.contains("128"), "{:?}", run.stderr);
+    assert!(run.stderr.contains("129"), "{:?}", run.stderr);
     assert!(scratch.lines().is_empty(), "nothing may be appended");
+
+    let at_the_bound = "x".repeat(128);
+    let run = declare(&at_the_bound);
+    run.expect(0);
+    assert_eq!(run.id(), at_the_bound);
+}
+
+#[test]
+fn a_stdin_record_may_carry_a_foreign_id_too() {
+    let scratch = Scratch::new();
+    // §5: "`pinki promise` reads JSON on stdin like everything else" — so the same id
+    // policy, on the same field, by the same code.
+    let record = format!(
+        r#"{{"id":"{FOREIGN}","promise":"ship it","by":"author","to":"publisher",
+             "until":"2026-09-03T12:00Z"}}"#
+    );
+    let run = scratch.feed(&["promise"], &record);
+    run.expect(0);
+    assert_eq!(run.id(), FOREIGN);
+
+    let event: serde_json::Value = serde_json::from_str(&scratch.lines()[0]).expect("valid JSON");
+    assert_eq!(event["id"], FOREIGN);
+
+    // And the refusal arrives the same way on that path.
+    let bad = r#"{"id":"pnk_nope","promise":"ship it","by":"author","to":"publisher",
+                  "until":"2026-09-03T12:00Z"}"#;
+    let run = scratch.feed(&["promise"], bad);
+    run.expect(2);
+    assert!(run.stderr.contains("reserved"), "{:?}", run.stderr);
+    assert_eq!(scratch.lines().len(), 1, "only the good one is on the file");
 }
 
 #[test]
@@ -492,6 +837,313 @@ fn an_explicit_id_that_is_already_declared_is_refused() {
         run.stderr
     );
     assert_eq!(scratch.lines().len(), 1, "the first declaration stands");
+}
+
+// -------------------------------------------------------------------- amend
+
+/// Fifteen minutes past `PAST`, so a nudge that lands here is still late.
+const PAST_PLUS_15: &str = "2020-01-01T00:15:00Z";
+
+/// The escalation ladder from issue #9, end to end.
+///
+/// A watchdog re-declares the *same* promise on a short clock when it lapses — minting
+/// a new id per nudge was considered and rejected, because it leaves a phantom promise
+/// behind for every rung. v0.1.0 refused that outright (first declaration wins), so the
+/// ladder is what `amend` exists for, and this is its acceptance case:
+///
+/// ```text
+/// declare  until = T
+/// amend    until = T + 15m     (nudge 1, same id)
+/// amend    until = T + 30m     (nudge 2, same id)
+/// resolve
+/// ```
+#[test]
+fn the_escalation_ladder_nudges_one_promise_twice() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    assert_eq!(state_of(&scratch, &id), "overdue");
+
+    // Nudge 1. The horizon moves and the state is recomputed against it — still late,
+    // because this rung is still in the past.
+    let first = scratch.run(&["amend", &id, "--until", PAST_PLUS_15, "--reason", "nudge 1"]);
+    first.expect(0);
+    assert_eq!(first.state(), "overdue");
+
+    // Nudge 2, onto a horizon that has not passed: the state follows the deadline.
+    let second = scratch.run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 2"]);
+    second.expect(0);
+    assert_eq!(second.state(), "detached");
+
+    // `ls` reports the current horizon, and the state computed against it.
+    let rows = scratch.run(&["ls", "--json"]);
+    rows.expect(0);
+    let listed = rows.json();
+    let row = &listed.as_array().expect("an array")[0];
+    assert_eq!(row["id"], id.as_str());
+    assert_eq!(row["until"], FUTURE, "ls shows the horizon as it stands");
+    assert_eq!(row["state"], "detached");
+
+    // Nothing was rewritten: one declaration, two amends, and the declaration still
+    // says exactly what it said.
+    let lines = scratch.lines();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    let declaration: serde_json::Value = serde_json::from_str(&lines[0]).expect("valid JSON");
+    assert_eq!(declaration["type"], "promise");
+    assert_eq!(declaration["until"], PAST);
+
+    let nudge: serde_json::Value = serde_json::from_str(&lines[1]).expect("valid JSON");
+    assert_eq!(nudge["type"], "amend");
+    assert_eq!(nudge["promise"], id.as_str());
+    // §8.2: the debtor's own act, and the default actor.
+    assert_eq!(nudge["by"], "watchdog");
+    assert_eq!(nudge["until"], PAST_PLUS_15);
+    assert_eq!(nudge["reason"], "nudge 1");
+
+    // `show` lists every horizon it has ever had, in order.
+    let detail = scratch.run(&["show", &id, "--json"]);
+    detail.expect(0);
+    let json = detail.json();
+    assert_eq!(json["until"], FUTURE);
+    let horizons = json["horizons"].as_array().expect("horizons");
+    assert_eq!(horizons.len(), 3, "{horizons:?}");
+    assert_eq!(horizons[0]["until"], PAST);
+    assert!(
+        horizons[0].get("reason").is_none(),
+        "the declaration needs no excuse: {}",
+        horizons[0]
+    );
+    assert_eq!(horizons[1]["until"], PAST_PLUS_15);
+    assert_eq!(horizons[1]["reason"], "nudge 1");
+    assert_eq!(horizons[2]["until"], FUTURE);
+    assert_eq!(horizons[2]["reason"], "nudge 2");
+    for horizon in horizons {
+        assert_eq!(horizon["by"], "watchdog");
+        assert!(horizon["ts"].is_string());
+    }
+
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(
+        text.stdout.contains(&format!("until        {FUTURE}\n")),
+        "{:?}",
+        text.stdout
+    );
+    assert!(text.stdout.contains("horizons\n"), "{:?}", text.stdout);
+    assert!(
+        text.stdout
+            .contains(&format!("  {PAST}  watchdog  (declared)\n")),
+        "{:?}",
+        text.stdout
+    );
+    assert!(
+        text.stdout
+            .contains(&format!("  {PAST_PLUS_15}  watchdog  nudge 1\n")),
+        "{:?}",
+        text.stdout
+    );
+
+    // An amend is not a resolution: the promise is still there to be resolved, and the
+    // first resolve still wins.
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--satisfied",
+            "--evidence",
+            "https://example.org/reports/9",
+        ])
+        .expect(0);
+    assert_eq!(state_of(&scratch, &id), "satisfied");
+
+    let second_resolve =
+        scratch.run(&["resolve", &id, "--cancelled", "--reason", "changed my mind"]);
+    second_resolve.expect(1);
+    assert!(
+        second_resolve.stderr.contains("already resolved"),
+        "{:?}",
+        second_resolve.stderr
+    );
+
+    // And a rung of the ladder that arrives after the promise ended is refused too:
+    // there is no horizon left to move.
+    let late_nudge = scratch.run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 3"]);
+    late_nudge.expect(1);
+    assert!(
+        late_nudge.stderr.contains("already resolved"),
+        "the error should name the resolution that ended it: {:?}",
+        late_nudge.stderr
+    );
+    assert_eq!(
+        scratch.lines().len(),
+        4,
+        "one promise, two amends, one resolve"
+    );
+}
+
+#[test]
+fn an_amend_by_anyone_but_the_debtor_is_refused() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    let before = scratch.lines();
+
+    // §8.2: moving a horizon is the debtor's own act. An observer who thinks the
+    // deadline should move is making an assessment, which is a different speech act.
+    let run = scratch.run(&["amend", &id, "--until", FUTURE, "--by", "desk"]);
+    run.expect(1);
+    assert!(
+        run.stderr.contains("§8.2"),
+        "the error should cite the rule: {:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("watchdog"),
+        "the error should name the debtor who may: {:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("assess"),
+        "the error should point at the verb that does fit: {:?}",
+        run.stderr
+    );
+    assert_eq!(scratch.lines(), before, "the ledger must be unchanged");
+
+    // The debtor naming itself is the same command, and it works.
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--by", "watchdog"])
+        .expect(0);
+    assert_eq!(state_of(&scratch, &id), "detached");
+}
+
+#[test]
+fn an_amend_with_an_unreadable_until_writes_nothing() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", FUTURE);
+    let before = scratch.lines();
+
+    let run = scratch.run(&["amend", &id, "--until", "2026-09-01T17:00:00"]);
+    run.expect(2);
+    assert!(run.stderr.contains("offset"), "{:?}", run.stderr);
+    assert_eq!(scratch.lines(), before);
+
+    // A deadline is required: there is nothing to amend without one.
+    scratch.run(&["amend", &id]).expect(2);
+    assert_eq!(scratch.lines(), before);
+
+    // Whitespace is not a reason.
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--reason", "   "])
+        .expect(2);
+    assert_eq!(scratch.lines(), before);
+}
+
+/// The forward-compatibility property, through the real reader.
+///
+/// This is the half that has to be tested against a *file*, not an in-memory `Vec`:
+/// the claim is about what a build does when a ledger carries an event type it has
+/// never heard of, and that is a deserialization question before it is a fold question.
+/// v0.1.0 answers it by refusing the entire file — which is exactly why this version
+/// answers it differently, and why the CHANGELOG says so out loud.
+#[test]
+fn an_event_type_this_build_does_not_know_costs_nothing_else_in_the_ledger() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 1"])
+        .expect(0);
+
+    // A line a newer pinki might write, appended between events this one understands.
+    let mut text = fs::read_to_string(scratch.ledger()).expect("the ledger");
+    text.push_str(
+        "{\"ts\":\"2026-09-02T09:00:00Z\",\"type\":\"frobnicate\",\"promise\":\"pnk_000000\",\"wat\":1}\n",
+    );
+    fs::write(scratch.ledger(), &text).expect("write the ledger back");
+
+    let run = scratch.run(&["ls", "--json"]);
+    run.expect(0);
+    let listed = run.json();
+    let rows = listed.as_array().expect("an array");
+    assert_eq!(rows.len(), 1, "the promise is still readable: {rows:?}");
+    assert_eq!(rows[0]["id"], id.as_str());
+    // The events it does know still fold exactly as they did.
+    assert_eq!(rows[0]["until"], FUTURE);
+    assert_eq!(rows[0]["state"], "detached");
+
+    // Loud, not fatal, and never silent: the warning names the line.
+    assert!(
+        run.stderr.contains("unknown event type"),
+        "the reader must say what it skipped: {:?}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("line 3"),
+        "the warning should name the line: {:?}",
+        run.stderr
+    );
+
+    // A line that is not an event at all is still fatal — that rule did not move.
+    fs::write(scratch.ledger(), format!("{text}{{not json\n")).expect("write the ledger back");
+    scratch.run(&["ls", "--json"]).expect(1);
+}
+
+#[test]
+fn amending_an_unknown_id_fails_operationally() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&["amend", "pnk_000000", "--until", FUTURE]);
+    run.expect(1);
+    assert!(scratch.lines().is_empty());
+}
+
+#[test]
+fn a_deadline_may_move_earlier_too() {
+    let scratch = Scratch::new();
+    // Not every move is an extension — pinki has no opinion about the direction, only
+    // about the move being visible.
+    let id = scratch.promise("hand back the report", "watchdog", "desk", FUTURE);
+    let run = scratch.run(&["amend", &id, "--until", PAST, "--reason", "brought forward"]);
+    run.expect(0);
+    assert_eq!(run.state(), "overdue");
+}
+
+#[test]
+fn show_has_no_horizons_block_until_a_deadline_moves() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", FUTURE);
+
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(
+        !text.stdout.contains("horizons"),
+        "a promise nobody amended has one horizon, and a list of one is noise: {:?}",
+        text.stdout
+    );
+
+    // The JSON field is always there, so a consumer can test it rather than probe.
+    let json = scratch.run(&["show", &id, "--json"]);
+    json.expect(0);
+    let horizons = json.json()["horizons"].as_array().expect("horizons").len();
+    assert_eq!(horizons, 1, "the declaration is a horizon");
+}
+
+#[test]
+fn the_a2a_block_carries_the_horizon_as_it_stands() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("hand back the report", "watchdog", "desk", PAST);
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 1"])
+        .expect(0);
+
+    let run = scratch.run(&["a2a", "task", &id]);
+    run.expect(0);
+    let block = run.json();
+    let (_, record) = block.as_object().expect("an object").iter().next().unwrap();
+    // A peer computing `now > until` for itself must get the answer this ledger gets —
+    // the divergence that filed issue #9 was exactly this, 32 minutes wide.
+    assert_eq!(record["until"], FUTURE);
+    assert_eq!(
+        record.as_object().expect("record object").len(),
+        5,
+        "still the §1 record and nothing else: {record}"
+    );
 }
 
 // ------------------------------------------------------------------ resolve
@@ -1290,13 +1942,32 @@ fn showing_an_unknown_id_fails_operationally() {
 }
 
 #[test]
-fn showing_an_id_that_is_not_even_well_formed_says_so() {
+fn showing_an_id_that_could_never_have_been_declared_says_so() {
     let scratch = Scratch::new();
-    let run = scratch.run(&["show", "bogus"]);
+    // `pnk_` is reserved, and this is not a minted id, so no route could have put it
+    // in the ledger. That is a typo, not a lookup miss, and the hint says which.
+    let run = scratch.run(&["show", "pnk_bogus"]);
     run.expect(1);
     assert!(
-        run.stderr.contains("not even a well-formed pinki id"),
-        "an id that could never have been minted earns a hint: {:?}",
+        run.stderr.contains("could never have been declared"),
+        "{:?}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("reserved"), "{:?}", run.stderr);
+}
+
+#[test]
+fn showing_an_unknown_foreign_id_is_a_plain_lookup_miss() {
+    let scratch = Scratch::new();
+    // Since §1 admits a caller's own id, "this does not look like a pinki id" is no
+    // longer evidence of anything — `bogus` is a perfectly declarable id, so the only
+    // true thing to say is that nothing declares it.
+    let run = scratch.run(&["show", "bogus"]);
+    run.expect(1);
+    assert!(run.stderr.contains("nothing in"), "{:?}", run.stderr);
+    assert!(
+        !run.stderr.contains("could never"),
+        "no hint is owed here: {:?}",
         run.stderr
     );
 }
@@ -1948,14 +2619,14 @@ fn the_fold_ignores_meta_on_every_event() {
 // Unreachable defensive code — the arm exists so the fold cannot panic on a ledger
 // somebody else wrote, and the surrounding code makes it unconstructible:
 //
-//   src/state.rs 206   `_ => State::Conditional` when a declared id has no memo entry.
+//   src/state.rs 316   `_ => State::Conditional` when a declared id has no memo entry.
 //                      Every id in `order` is solved before this runs, and `solve`
 //                      only ever terminates with `Memo::Done`.
-//   src/state.rs 257-259  the dangling arm in `solve`, for an id with no record.
+//   src/state.rs 371-373  the dangling arm in `solve`, for an id with no record.
 //                      `solve` is called only for ids in `records`, and an antecedent
 //                      is `contains_key`-checked before it is pushed on the stack, so
 //                      `self.records.get(current)` is always `Some`.
-//   src/state.rs 270   `None => State::Detached` for a resolution that is not one.
+//   src/state.rs 384   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
 //   src/verbs.rs 636   `_ => None` over `view.assessments`, which `fold` fills only

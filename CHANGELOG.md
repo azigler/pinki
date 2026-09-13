@@ -13,6 +13,26 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- **The `amend` event, and the `amend` verb** — a deadline that moves, without a
+  silent move and without a phantom record per move. `pinki amend <ID> --until ISO
+  [--reason TEXT] [--by WHO]` appends `{"type":"amend","promise":…,"by":…,"until":…}`
+  beside the declaration; the fold takes the latest amend's `until` as the current
+  horizon and keeps every earlier one, which `show` lists in order (text and
+  `--json`'s `horizons`). `ls`, `show` and the A2A `metadata` block all carry the
+  horizon as it stands, so an outside observer computes the same `overdue` as the
+  fleet that owns the promise. Closes
+  [#9](https://github.com/azigler/pinki/issues/9), which arrived with the
+  measurement that motivates it: an escalation ladder re-declaring the same id had an
+  observer scoring a live promise overdue 32 minutes before its owner did.
+- **DESIGN.md § 8's second open question is settled** — the `amend` event, not
+  re-declaration and not supersede-with-lineage, with the reasoning and the rejected
+  alternatives recorded in place (§ 4 and § 8.2).
+- **Forward tolerance for event types.** An event whose `type` this build does not know
+  is now read, warned about on stderr with its line number, and ignored by the fold,
+  instead of aborting the whole ledger. One unknown line no longer costs you the file.
+  A line that is not an event at all is still fatal — "an event I have not heard of" and
+  "not an event" are different things, and only the first is survivable.
+
 - **`meta`: one reserved, opaque object on the record — the provenance extension
   point** ([#6](https://github.com/azigler/pinki/issues/6)). The record was a closed
   set of seven keys, and `pinki promise` reads stdin with `deny_unknown_fields`, so an
@@ -47,7 +67,125 @@ tools can depend on them, not merely read them.
   Duplicate keys inside `meta` resolve last-wins on parse (`serde_json`'s documented
   behavior), silently.
 
-### Compatibility with the transcript
+### Changed
+
+- **The deadline in `ls`, `show` and `a2a task` is the current one**, not the
+  declared one, once a promise has been amended. The declaration itself is never
+  rewritten: `first declaration wins` is unchanged, and a fold that skips `amend`
+  events still answers what it answered before — the declared horizon.
+
+- **`--id` accepts an id you already have.** It used to refuse anything that was not
+  `pnk_` plus six lowercase hex digits, which made the one affordance that looks like
+  "carry your ledger over" not be one. A supplied id is now opaque: any non-blank
+  string with no whitespace, no control characters and no invisible characters, up to
+  128 characters. Minting
+  is untouched — leave `--id` off and you get a `pnk_` id exactly as before — and the
+  stdin record's `"id"` takes the same forms, by the same code. Closes
+  [#5](https://github.com/azigler/pinki/issues/5).
+
+  Two consequences, both from the issue. **Adoption**: an arriving ledger keeps the
+  ids other systems already reference, instead of needing a permanent side table
+  mapping them to pinki's. **The join**: DESIGN.md § 7 offers the ledger join as
+  pinki's answer to commitment misalignment, and it is keyed by promise id — so it
+  now works between parties who did not both mint here, which is the only version of
+  it that was ever worth much.
+
+  What did **not** change, on purpose: there is no `external_id` field. Two id fields
+  is two ways to name one promise and a decision, per reader, about which one the `on`
+  edge and the A2A `metadata` block key on. One opaque field is the smaller thing that
+  works. And uniqueness is unchanged and non-negotiable — declaring an id the ledger
+  already declares is refused with § 4's first-declaration-wins message whether it was
+  minted or supplied, which is the collision check the six-hex space never really had.
+
+- **An id may not contain an invisible character.** A supplied id holding a character
+  with the Unicode **`Default_Ignorable_Code_Point`** property — zero-width spaces and
+  joiners, the bidi controls, variation selectors, tag characters, soft hyphen, the
+  Hangul fillers — is refused (exit 2, nothing appended, message citing § 1 and naming
+  the code point, which is the only way to see a character that renders as nothing).
+
+  It is its own rule because neither of the other two catches it: U+200B ZERO WIDTH
+  SPACE is `White_Space=No` in Unicode despite its name, and none of these are control
+  characters, so `char::is_whitespace()` and `char::is_control()` are both `false`.
+  Without the rule, two ids that are **not equal** can be **indistinguishable** — in
+  `pinki ls`, in a terminal, in a code review, and to whoever is deciding whether § 7's
+  join matched. An identifier whose equality the eye cannot check is not a handle.
+
+  Non-ASCII is otherwise entirely fine, and tested: `υπόσχεση-91` and `約束-91` are
+  accepted. This is a rule about invisibility, not about script. The set is Unicode
+  16.0.0's (`DerivedCoreProperties.txt`), carried as a 17-range table in `src/id.rs`
+  rather than a new dependency — Cargo.toml's list is DESIGN.md § 7's no-network
+  invariant, so a crate has to earn itself, and this one would buy seventeen lines.
+
+- **`pnk_` is reserved for minted ids.** A supplied id wearing that prefix without
+  being six lowercase hex digits is refused (exit 2, nothing appended). The
+  reservation keeps "was this minted here?" answerable from the id alone, which is
+  what lets an unknown-id error distinguish a typo — `pnk_bogus` could never have
+  been declared — from a plain lookup miss. An adopter gives up nothing: an id space
+  that already starts with `pnk_` is pinki's own.
+
+- **The unknown-id hint no longer calls a foreign id malformed.** `pinki show bogus`
+  used to add "(and `bogus` is not even a well-formed pinki id)". Since § 1 now admits
+  a caller's own id, that sentence is false — `bogus` is a perfectly declarable id —
+  so the hint fires only for the reserved-prefix case above.
+
+### Compatibility
+
+- **A ledger containing an `amend` line requires this version or later. v0.1.0 refuses
+  it — the whole file, not the line.** Measured, not assumed:
+
+  ```console
+  $ pinki --version
+  pinki 0.1.0
+  $ PINKI_LEDGER=./with-amends.jsonl pinki ls --all
+  pinki: ledger ./with-amends.jsonl: line 2 is not a valid pinki event: unknown
+  variant `amend`, expected one of `promise`, `resolve`, `assess`
+  $ echo $?
+  1
+  ```
+
+  Its parser has no fallback for an unknown `type`, and a line that will not parse is
+  fatal to the read. So this is **breaking for old readers**, though not for the record
+  shape: the `promise` event is byte-identical to what v0.1.0 wrote, and an old reader
+  handed a ledger with no amends in it is unaffected. The forward-tolerance above is
+  the fix going forward, and it can only ever help the *next* event type — it cannot
+  reach backwards into a binary already installed.
+
+- **This one is not breaking, and that is a measured claim rather than a hope.** A
+  ledger containing foreign ids is read by **v0.1.0** — the whole file, every verb —
+  because nothing about the record's *shape* changed: the `promise` event carries the
+  same keys in the same order, and v0.1.0's `--id` refusal was a check on **input**,
+  never on what it reads back. Observed against the v0.1.0 binary, on a ledger this
+  build wrote:
+
+  ```console
+  $ pinki --version
+  pinki 0.1.0
+  $ PINKI_LEDGER=./foreign.jsonl pinki ls --all
+  pr-20260906203134-225e24cd  satisfied  2099-01-01T00:00:00Z  reviewer -> author   hand back a reviewed schema
+  pnk_cfb64b                  detached   2099-01-02T00:00:00Z  author -> publisher  ship it
+  $ echo $?
+  0
+  ```
+
+  `show`, `ls --json` and `a2a task` on the foreign id all succeed on v0.1.0 too, and
+  so do `resolve` and `assess` against it — those verbs never validated an id's shape,
+  they only looked it up. The single thing v0.1.0 cannot do with a foreign id is
+  **declare** one: `pinki promise --id pr-20260906203134-225e24cd` still exits 2
+  there, which is issue #5 itself.
+
+  So the upgrade is one-directional in exactly one place: a ledger with foreign ids in
+  it can be read by an old reader and *appended to* by an old reader; it just cannot
+  have had that first line written by one.
+
+- **The invisible-character rule is a check on input too, and worth saying plainly.**
+  It refuses a *declaration*; it does not retro-validate a ledger. A row whose id
+  already holds an invisible character — written by another implementation, by a hand
+  edit, or by an earlier build of this branch — is still read, shown, resolved and
+  assessed by **this** version, because no read path re-checks an id's shape. An old
+  reader reads it too, for the same reason it reads any other foreign id. The
+  asymmetry is therefore the same one as above and no bigger: an id this version will
+  not let you declare is an id both old and new readers will still show you. It is
+  your ledger; nothing here rewrites or hides a line you already have.
 
 **A ledger containing `meta` is readable by v0.1.0, and v0.1.0 will silently drop the
 `meta` from everything it prints.** Measured against the installed v0.1.0 binary on a
@@ -79,7 +217,25 @@ the first write. Values, types and nesting round-trip exactly, and every read su
 agrees byte for byte with the ledger line — but if you are diffing bytes against your
 own input, diff against the first write instead.
 
+### Refused, on purpose
+
+- **Only the debtor may amend** (§ 8.2). An amend naming anyone else is refused with
+  the rule cited and nothing appended; an observer who thinks a deadline should move
+  is making an assessment, which is a different speech act with its own verb. Like
+  every other rule here this is enforced where input arrives, never in the fold —
+  pinki authenticates nobody, and a joined ledger may carry an amend written by
+  something looser.
+- **A resolved promise cannot be amended.** The first resolve wins and ends it; there
+  is no horizon left to move.
+
 ### Testing
+
+- **158 tests** — 96 unit, 62 driving the real binary — including the three-step
+  escalation ladder from #9 end to end, and the forward-tolerance property tested
+  where it actually lives: a real ledger *file* carrying a line of an unknown type,
+  read by the real binary, folding to the same answer the known events alone give. The
+  deliberately uncovered lines at the end of `tests/cli.rs` are unchanged in kind;
+  their line numbers moved.
 
 - **159 tests** — 94 unit, 65 driving the real binary — at **98.04%** line coverage
   against CI's 97% floor. The uncovered set is eleven lines, enumerated with reasons at

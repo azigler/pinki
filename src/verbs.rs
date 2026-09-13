@@ -1,4 +1,4 @@
-//! The six verbs — DESIGN.md §5.
+//! The seven verbs — DESIGN.md §5.
 //!
 //! Every verb is the same three moves: read the ledger, fold it into states at
 //! `now`, and then either print or append exactly one event. Nothing here holds
@@ -22,6 +22,7 @@
 //! success — and every error message goes to stderr, never stdout, so a `--json`
 //! pipeline never receives prose.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, IsTerminal, Read};
@@ -32,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::a2a;
 use crate::cli::{
-    A2aCommand, AssessArgs, Command, LsArgs, PromiseArgs, ResolveArgs, Scope, ShowArgs,
+    A2aCommand, AmendArgs, AssessArgs, Command, LsArgs, PromiseArgs, ResolveArgs, Scope, ShowArgs,
 };
 use crate::event::{Event, EventBody, Resolution};
 use crate::id;
@@ -82,6 +83,7 @@ impl fmt::Display for Fail {
 pub fn run(command: Command) -> Result<(), Fail> {
     match command {
         Command::Promise(args) => promise(args),
+        Command::Amend(args) => amend(args),
         Command::Resolve(args) => resolve(args),
         Command::Assess(args) => assess(args),
         Command::Ls(args) => ls(args),
@@ -166,20 +168,32 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
         None => None,
     };
 
+    // §1's id policy, checked before the ledger is consulted for the same reason
+    // `--until` is: an id pinki will not accept is malformed whether or not the ledger
+    // happens to hold it. A supplied id is *opaque* — any non-blank string with no
+    // whitespace, no control characters and no invisible ones, bounded, and not
+    // squatting the minted `pnk_` namespace — because an adopter's existing ids are
+    // already referenced from elsewhere, and §7's join needs both parties' keys, not
+    // pinki-minted ones.
+    let supplied = match incoming.id {
+        Some(given) => {
+            let given = given.trim().to_string();
+            id::check_supplied(&given)
+                .map_err(|e| Fail::Usage(format!("`{given}` will not do as an id: {e}")))?;
+            Some(given)
+        }
+        None => None,
+    };
+
     let mut events = read_ledger()?;
     let now = now_to_the_second();
 
-    let id = match incoming.id {
+    let id = match supplied {
+        // Being permissive about the *shape* is safe because uniqueness is not
+        // negotiable: this is §4's first-declaration-wins guard, and it does not care
+        // which space the id came from. A supplied id that collides with one pinki
+        // minted earlier is refused by exactly this line.
         Some(given) => {
-            let given = given.trim().to_string();
-            if !id::is_well_formed(&given) {
-                return Err(Fail::Usage(format!(
-                    "`{given}` is not a well-formed promise id: expected `{}` followed by exactly \
-                     six lowercase hex digits, e.g. `{}4f3a91`",
-                    id::PREFIX,
-                    id::PREFIX
-                )));
-            }
             if fold(&events, now).get(&given).is_some() {
                 return Err(Fail::Op(format!(
                     "`{given}` is already declared in {} — ids are stable, so pinki will not \
@@ -269,6 +283,84 @@ fn read_incoming_from_stdin() -> Result<Incoming, Fail> {
              `task`, `meta` — no other keys"
         ))
     })
+}
+
+// ---------------------------------------------------------------- amend
+
+/// Move a promise's horizon — §4's `amend` event, which is §8.2's answer to "moving a
+/// deadline".
+///
+/// Nothing is rewritten: the `promise` event stays exactly as it was spoken and the
+/// amend is appended beside it, so the deadline history is auditable rather than
+/// replaced. Two refusals, and both are rules about this ledger rather than about the
+/// command as typed, so both are operational failures:
+///
+/// - **A resolved promise cannot be amended.** It ended; there is no horizon left to
+///   move. Same shape as the second-resolve refusal, and the same §4 reason.
+/// - **Only the debtor may amend** (§8.2). A promise is the debtor's own declaration
+///   and moving its horizon is a new act by the same party. This is a check on the
+///   *speech act*, not an authority claim — pinki authenticates nobody (§4: "it records
+///   who claimed what") — so it lives here at the edge and the fold still reads an
+///   amend written by anyone.
+fn amend(args: AmendArgs) -> Result<(), Fail> {
+    // The shape of the command is checked before the ledger is consulted: an unreadable
+    // deadline is malformed whether or not the id exists.
+    let until = parse_until(&args.until)?;
+    let reason = match &args.reason {
+        Some(reason) => Some(non_blank(reason, "--reason")?),
+        None => None,
+    };
+
+    let mut events = read_ledger()?;
+    let now = now_to_the_second();
+
+    let by = {
+        let folded = fold(&events, now);
+        let view = folded
+            .get(&args.id)
+            .ok_or_else(|| unknown_id(&args.id, "amend"))?;
+
+        if let Some(event) = view.resolution {
+            let kind = event
+                .resolution()
+                .map(Resolution::as_str)
+                .unwrap_or("resolved");
+            return Err(Fail::Op(format!(
+                "`{}` is already resolved: {kind} at {}. A resolve ends the promise and the first \
+                 one wins (§4), so there is no horizon left to move — nothing was appended",
+                args.id, event.ts
+            )));
+        }
+
+        let debtor = view.record.by.clone();
+        match &args.by {
+            Some(given) => {
+                let given = non_blank(given, "`by`")?;
+                if given != debtor {
+                    return Err(Fail::Op(format!(
+                        "`{given}` may not amend `{}`: moving a horizon is the debtor's own act, \
+                         and the debtor here is `{debtor}` (§8.2). An observer who thinks this \
+                         deadline should move is making an assessment, not a new promise — \
+                         `pinki assess {} --violated --observer {given}` publishes that, \
+                         attributed. Nothing was appended",
+                        args.id, args.id
+                    )));
+                }
+                given
+            }
+            None => debtor,
+        }
+    };
+
+    let event = Event::new(
+        now.to_string(),
+        EventBody::amend(&args.id, by, until, reason),
+    );
+    append(&event)?;
+    events.push(event);
+
+    report(&events, now, &args.id);
+    Ok(())
 }
 
 // ---------------------------------------------------------------- resolve
@@ -452,10 +544,14 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
 /// Flattened rather than nested so a consumer reads `.[0].until` and `.[0].state`
 /// side by side, and serialized straight to a string so the record keeps §1's field
 /// order with `state` appended.
+///
+/// The record is the *current* one — `until` is the latest horizon, not the declared
+/// one, for the same reason the state beside it is computed against that horizon. The
+/// deadline history is `show`'s to render.
 #[derive(Serialize)]
 struct Row<'a> {
     #[serde(flatten)]
-    record: &'a Promise,
+    record: Cow<'a, Promise>,
     state: &'static str,
 }
 
@@ -483,7 +579,7 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
         let json: Vec<Row> = rows
             .iter()
             .map(|view| Row {
-                record: view.record,
+                record: view.current_record(),
                 state: view.state.as_str(),
             })
             .collect();
@@ -514,7 +610,7 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
 
     let id_width = width(rows.iter().map(|view| view.id()));
     let state_width = width(rows.iter().map(|view| view.state.as_str()));
-    let until_width = width(rows.iter().map(|view| view.record.until.as_str()));
+    let until_width = width(rows.iter().map(|view| view.until()));
     let parties: Vec<String> = rows
         .iter()
         .map(|view| format!("{} -> {}", view.record.by, view.record.to))
@@ -526,7 +622,7 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
             "{:<id_width$}  {:<state_width$}  {:<until_width$}  {:<party_width$}  {}",
             view.id(),
             view.state.as_str(),
-            view.record.until,
+            view.until(),
             party,
             ellipsize(&view.record.promise, 56),
         );
@@ -536,18 +632,37 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
 
 // ---------------------------------------------------------------- show
 
-/// `show --json`: the record, the computed state, how it ended, and every judgment.
+/// `show --json`: the record, the computed state, every horizon, how it ended, and
+/// every judgment.
 #[derive(Serialize)]
 struct Detail<'a> {
     #[serde(flatten)]
-    record: &'a Promise,
+    record: Cow<'a, Promise>,
     state: &'static str,
+    /// Every deadline this promise has had, in log order — the declaration first, then
+    /// one entry per `amend`. Always at least one, and its last entry's `until` is the
+    /// `until` above.
+    ///
+    /// The declaration is *in* this list rather than left implicit, because a list of
+    /// amendments alone would lose the horizon the promise was born with — and "the
+    /// deadline history stays auditable" is the whole reason §4 has an `amend` event
+    /// instead of a re-declaration.
+    horizons: Vec<HorizonJson<'a>>,
     /// `null` until somebody resolves it — the field is always present so a consumer
     /// can test it rather than probe for it.
     resolution: Option<ResolutionJson<'a>>,
     /// Every assessment naming this promise, in log order. Two contradicting ones both
     /// appear: §3, "that is not a bug in pinki; it is the actual state of the world."
     assessments: Vec<AssessmentJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct HorizonJson<'a> {
+    ts: &'a str,
+    until: &'a str,
+    by: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -616,6 +731,17 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         })
     });
 
+    let horizons: Vec<HorizonJson> = view
+        .horizons
+        .iter()
+        .map(|horizon| HorizonJson {
+            ts: horizon.ts,
+            until: horizon.until,
+            by: horizon.by,
+            reason: horizon.reason,
+        })
+        .collect();
+
     let assessments: Vec<AssessmentJson> = view
         .assessments
         .iter()
@@ -639,8 +765,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
 
     if args.json {
         let detail = Detail {
-            record: view.record,
+            record: view.current_record(),
             state: view.state.as_str(),
+            horizons,
             resolution,
             assessments,
         };
@@ -655,7 +782,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     if let Some(on) = &view.record.on {
         println!("  on           {on}");
     }
-    println!("  until        {}", view.record.until);
+    println!("  until        {}", view.until());
     if let Some(task) = &view.record.task {
         println!("  task         {task}");
     }
@@ -663,6 +790,28 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         // One line, as JSON, and only when there is one. pinki does not know what any
         // of these keys mean, so it does not pretend to lay them out.
         println!("  meta         {}", one_line(meta));
+    }
+
+    // Only printed when the deadline actually moved: an unamended promise has exactly
+    // one horizon, and a list of one is noise. When it did move, every horizon is here
+    // in order — §4: the deadline history stays auditable, which is the difference
+    // between amending and re-declaring.
+    if !view.amendments().is_empty() {
+        println!("  horizons");
+        for (index, horizon) in horizons.iter().enumerate() {
+            let note = if index == 0 {
+                "  (declared)".to_string()
+            } else {
+                horizon
+                    .reason
+                    .map(|reason| format!("  {reason}"))
+                    .unwrap_or_default()
+            };
+            println!(
+                "    {}  {}  {}{note}",
+                horizon.ts, horizon.until, horizon.by
+            );
+        }
     }
 
     match &resolution {
@@ -725,10 +874,12 @@ fn a2a_task(id: &str) -> Result<(), Fail> {
     let view = folded.get(id).ok_or_else(|| unknown_id(id, "a2a task"))?;
 
     // No computed state rides the block. A2A-EXTENSION.md §2: `overdue` is never an
-    // A2A state, and the metadata key carries the record verbatim.
+    // A2A state, and the metadata key carries the record verbatim — with the horizon it
+    // currently has, so a peer computing `now > until` for itself gets the same answer
+    // this ledger does.
     println!(
         "{}",
-        a2a::task_metadata(view.record)
+        a2a::task_metadata(&view.current_record())
             .map_err(|e| Fail::Op(format!("could not encode the Task metadata block: {e}")))?
     );
     Ok(())
@@ -764,14 +915,22 @@ fn report(events: &[Event], now: Timestamp, id: &str) {
     println!("{id}\t{state}");
 }
 
+/// An id nothing in the ledger declares.
+///
+/// The hint is narrow on purpose. Since §1 admits a caller's own id, "this does not
+/// look like a pinki id" is no longer evidence of anything — a fleet's own id space is
+/// a perfectly good id here. The one shape that still earns a remark is an id wearing
+/// the reserved `pnk_` prefix without being a minted one: that one could never have
+/// been declared, by any route, so it is a typo rather than a lookup miss.
 fn unknown_id(id: &str, verb: &str) -> Fail {
-    let hint = if id::is_well_formed(id) {
-        String::new()
-    } else {
+    let hint = if id.starts_with(id::PREFIX) && !id::is_well_formed(id) {
         format!(
-            " (and `{id}` is not even a well-formed pinki id — those are `{}` plus six hex digits)",
+            " (and `{id}` could never have been declared: `{}` is reserved for minted ids, \
+             which are the prefix plus exactly six lowercase hex digits)",
             id::PREFIX
         )
+    } else {
+        String::new()
     };
     Fail::Op(format!(
         "cannot {verb} `{id}`: nothing in {} declares it{hint}",

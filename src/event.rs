@@ -1,8 +1,9 @@
-//! The log's three event types — DESIGN.md §4.
+//! The log's four event types — DESIGN.md §4.
 //!
-//! Append-only JSONL. `promise` speaks an obligation into existence, `resolve` ends
-//! one, `assess` publishes somebody's judgment about one. State is a fold over these
-//! (see [`crate::state`]); nothing here stores a state.
+//! Append-only JSONL. `promise` speaks an obligation into existence, `amend` moves its
+//! horizon without rewriting anything, `resolve` ends one, and `assess` publishes
+//! somebody's judgment about one. State is a fold over these (see [`crate::state`]);
+//! nothing here stores a state.
 //!
 //! ## The wire shape is the contract
 //!
@@ -17,8 +18,8 @@
 //!
 //! - in a **`promise`** event, `id` is the promise's id and `promise` is the free
 //!   text of the thing owed;
-//! - in a **`resolve`** or **`assess`** event, `promise` is the **id being resolved
-//!   or assessed**.
+//! - in an **`amend`**, **`resolve`** or **`assess`** event, `promise` is the **id
+//!   being amended, resolved or assessed**.
 //!
 //! It reads correctly in both places — "the promise" is the text when you are
 //! speaking it and the referent when you are pointing at it — and the log is the
@@ -70,11 +71,17 @@ impl Event {
     }
 
     /// The promise id this event is about — the record's `id` for a `promise` event,
-    /// the referenced id for `resolve` and `assess`.
+    /// the referenced id for `amend`, `resolve` and `assess`.
     pub fn subject(&self) -> &str {
         match &self.body {
             EventBody::Promise(p) => &p.id,
-            EventBody::Resolve { promise, .. } | EventBody::Assess { promise, .. } => promise,
+            EventBody::Amend { promise, .. }
+            | EventBody::Resolve { promise, .. }
+            | EventBody::Assess { promise, .. } => promise,
+            // An event this build cannot read is an event whose subject it cannot read
+            // either. The empty string is no id — it matches nothing and reserves
+            // nothing — which is the honest answer and the safe one.
+            EventBody::Unknown => "",
         }
     }
 
@@ -92,6 +99,7 @@ impl Event {
         match &self.body {
             EventBody::Promise(p) => p.meta.as_ref(),
             EventBody::Resolve { meta, .. } | EventBody::Assess { meta, .. } => meta.as_ref(),
+            EventBody::Amend { .. } | EventBody::Unknown => None,
         }
     }
 }
@@ -105,6 +113,24 @@ pub enum EventBody {
     /// definition of the field set, so the log and the A2A `metadata` block cannot
     /// drift apart. Its `meta`, when it has one, is the record's.
     Promise(Promise),
+    /// Moves a promise's horizon — §4's `amend`, and the answer to §8's second open
+    /// question. It never rewrites the `promise` event: the declaration stays exactly
+    /// as it was spoken, and the deadline history is the log's to keep.
+    Amend {
+        /// The id whose horizon is moving.
+        promise: String,
+        /// Who is moving it. §8.2 admits only the debtor; the check is the `amend`
+        /// verb's, not the fold's, for the same reason every other rule is enforced at
+        /// the edge — a joined ledger may carry one written by something stricter or
+        /// looser than this build.
+        by: String,
+        /// The new deadline, ISO-8601.
+        until: String,
+        /// Why the deadline moved. Encouraged, not required — an escalation ladder
+        /// amends on a clock and has one reason for every rung.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// Ends a promise.
     Resolve {
         /// The id being resolved.
@@ -128,6 +154,25 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<Meta>,
     },
+    /// An event whose `type` this build does not know — almost certainly written by a
+    /// newer pinki, or by another implementation of the vocabulary.
+    ///
+    /// It exists so that **one unknown line cannot cost you the whole ledger**. Without
+    /// it, a v0.1.0 reader handed a ledger containing an `amend` refuses to read the
+    /// file at all: the parse fails, and [`crate::ledger::read_at`] treats a line it
+    /// cannot parse as fatal — correctly, because a line silently skipped is §4's
+    /// truncation told one line at a time. This variant draws the distinction that
+    /// makes both rules true: a line that is *not an event* is still fatal, while an
+    /// event of a type this build has not heard of is read, counted, warned about on
+    /// stderr, and ignored by the fold.
+    ///
+    /// The body is deliberately dropped rather than kept: pinki never rewrites a line
+    /// it read, so nothing here is ever serialized back out, and holding a payload
+    /// nothing can interpret would only invite something to try. It also means an
+    /// `Event` carrying this variant does **not** round-trip, which is exactly why
+    /// nothing appends one — the file on disk is the record, not this struct.
+    #[serde(other)]
+    Unknown,
 }
 
 impl EventBody {
@@ -142,12 +187,28 @@ impl EventBody {
             EventBody::Resolve { meta: slot, .. } | EventBody::Assess { meta: slot, .. } => {
                 *slot = meta
             }
+            EventBody::Amend { .. } | EventBody::Unknown => {}
         }
         self
     }
     /// A `promise` event body.
     pub fn promise(record: Promise) -> Self {
         EventBody::Promise(record)
+    }
+
+    /// An `amend` event body: the same promise, a new horizon.
+    pub fn amend(
+        promise: impl Into<String>,
+        by: impl Into<String>,
+        until: impl Into<String>,
+        reason: Option<String>,
+    ) -> Self {
+        EventBody::Amend {
+            promise: promise.into(),
+            by: by.into(),
+            until: until.into(),
+            reason,
+        }
     }
 
     /// `resolve … --satisfied`. Issued by the debtor; `evidence` is non-optional
@@ -317,6 +378,49 @@ mod tests {
     }
 
     #[test]
+    fn amend_event_matches_design_section_4() {
+        let ev = Event::new(
+            "2026-09-01T17:05:00Z",
+            EventBody::amend(
+                "pnk_4f3a91",
+                "…/reviewer",
+                "2026-09-01T17:15:00Z",
+                Some("nudge 1".into()),
+            ),
+        );
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"ts":"2026-09-01T17:05:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T17:15:00Z","reason":"nudge 1"}"#
+        );
+    }
+
+    #[test]
+    fn amend_omits_an_absent_reason() {
+        let ev = Event::new(
+            "2026-09-01T17:05:00Z",
+            EventBody::amend("pnk_4f3a91", "…/reviewer", "2026-09-01T17:15:00Z", None),
+        );
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(!json.contains("reason"), "{json}");
+        assert!(
+            json.ends_with(r#""until":"2026-09-01T17:15:00Z"}"#),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn an_amend_is_not_a_resolution() {
+        // It moves the horizon; it does not end anything. §4 — the `resolve` table is
+        // the only way out.
+        let ev = Event::new(
+            "2026-09-01T17:05:00Z",
+            EventBody::amend("pnk_4f3a91", "…/reviewer", "2026-09-01T17:15:00Z", None),
+        );
+        assert!(ev.resolution().is_none());
+        assert_eq!(ev.subject(), "pnk_4f3a91");
+    }
+
+    #[test]
     fn assess_event_matches_design_section_4() {
         let ev = Event::new(
             "2026-09-02T09:00:00Z",
@@ -391,6 +495,19 @@ mod tests {
                 "2026-09-02T09:00:00Z",
                 EventBody::violated("pnk_88de10", "…/author", None),
             ),
+            Event::new(
+                "2026-09-01T17:05:00Z",
+                EventBody::amend(
+                    "pnk_4f3a91",
+                    "…/reviewer",
+                    "2026-09-01T17:15:00Z",
+                    Some("nudge 1".into()),
+                ),
+            ),
+            Event::new(
+                "2026-09-01T17:20:00Z",
+                EventBody::amend("pnk_4f3a91", "…/reviewer", "2026-09-01T17:30:00Z", None),
+            ),
         ] {
             let text = serde_json::to_string(&ev).unwrap();
             let back: Event = serde_json::from_str(&text).unwrap_or_else(|e| {
@@ -406,6 +523,7 @@ mod tests {
             r#"{"ts":"2026-08-28T20:14:03Z","type":"promise","id":"pnk_4f3a91","promise":"hand back a reviewed schema","by":"…/reviewer","to":"…/author","on":"pnk_0c2b77","until":"2026-09-01T17:00:00Z"}"#,
             r#"{"ts":"2026-09-01T16:02:11Z","type":"resolve","promise":"pnk_4f3a91","as":"satisfied","by":"…/reviewer","evidence":["https://example.org/reviews/91"]}"#,
             r#"{"ts":"2026-09-02T09:00:00Z","type":"assess","promise":"pnk_88de10","state":"violated","observer":"…/author","note":"nothing shipped, no reason given"}"#,
+            r#"{"ts":"2026-09-01T15:00:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T18:00:00Z","reason":"the schema landed late"}"#,
         ];
         let events: Vec<Event> = lines
             .iter()
@@ -417,6 +535,13 @@ mod tests {
         assert_eq!(events[1].resolution().unwrap().by(), "…/reviewer");
         assert_eq!(events[2].subject(), "pnk_88de10");
         assert!(events[2].resolution().is_none());
+        assert_eq!(events[3].subject(), "pnk_4f3a91");
+        assert!(events[3].resolution().is_none());
+        assert!(matches!(
+            &events[3].body,
+            EventBody::Amend { until, reason: Some(reason), .. }
+                if until == "2026-09-01T18:00:00Z" && reason == "the schema landed late"
+        ));
     }
 
     // ------------------------------------------------------------------ meta

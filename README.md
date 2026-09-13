@@ -86,7 +86,7 @@ Three layers, separately adoptable:
    the AgentCard declaration, the `A2A-Extensions` header, and URI-prefixed
    `metadata` keys. No new task states, no new roles.
    → [docs/A2A-EXTENSION.md](docs/A2A-EXTENSION.md)
-3. **A CLI over an append-only JSONL log** — six verbs, no daemon, no server, no
+3. **A CLI over an append-only JSONL log** — seven verbs, no daemon, no server, no
    database, and **no network calls at all**. It writes JSON to stdout and you pipe
    it into the A2A client you already run.
 
