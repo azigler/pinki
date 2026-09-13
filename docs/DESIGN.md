@@ -44,6 +44,7 @@ One record type. A promise.
 | `on` | no | Antecedent: the `id` of another promise. Absent means born owed. |
 | `until` | yes | Deadline, ISO-8601. |
 | `task` | no | The A2A `Task.id` this promise is *about*, when there is one. |
+| `meta` | no | An opaque object, carried and never interpreted. See below. |
 
 `task` is the one place the vocabulary reaches toward A2A, and it is deliberately
 optional and one-directional. A promise may be about a Task, but it does not live
@@ -58,7 +59,75 @@ Three deliberate absences:
 - **No `created` field.** The `promise` event's own `ts` already carries it. Storing
   it twice invites the two copies to disagree.
 - **No priority, no tags, no assignee, no project.** Those are your orchestrator's
-  business. pinki holds the obligation and nothing else.
+  business. pinki holds the obligation and nothing else — and `meta`, below, is where
+  they cross the seam without pinki acquiring an opinion about them.
+
+### `meta` is the one open door
+
+Everything above it is closed. `meta` is not.
+
+```json
+{
+  "id":      "pnk_4f3a91",
+  "promise": "hand back a reviewed schema",
+  "by":      "https://example.org/agents/reviewer",
+  "to":      "https://example.org/agents/author",
+  "until":   "2026-09-01T17:00:00Z",
+  "meta":    { "by": "scheduler", "kind": "nudge", "ref": "run-4131" }
+}
+```
+
+`meta` is an optional JSON **object**, and pinki does exactly three things with it:
+stores it, hands it back, and never reads it. Not one key inside it is interpreted,
+by the fold or by anything else.
+
+> **The arithmetic fields stay closed; `meta` is the one open door; the fold never
+> reads it.**
+
+Both halves are load-bearing. A system adopting pinki already has rows carrying
+provenance — which component declared this, on whose behalf, under which policy,
+citing what — and the seven fields above have nowhere to put any of it. With no door,
+adoption means projecting all of that away at the seam, and §4's "the log is the whole
+system" quietly becomes *most* of it. With the door in the wrong place — a field the
+fold consults — §3's "any two implementations produce the same answer" stops being
+true, because the second implementation would have to agree about a field it has never
+heard of.
+
+The rules are all shape and no content:
+
+| Rule | Why |
+|---|---|
+| It must be an object | A consumer has to be able to take the one key it understands and leave the rest alone. That is what makes `meta` safe to ignore. |
+| It may not be empty | `"meta": {}` is provenance offered and left blank. Omit it instead: an absent `meta` writes no key at all. |
+| It is capped at 8 KiB, measured on its canonicalized, compact serialized form after parsing — not on the literal `--meta` input bytes | A ledger line is a line. Provenance is a handful of short keys; a payload belongs behind a reference *in* `meta`, not inside it. |
+| Nothing else | Nesting, arrays, nulls, keys pinki has never heard of — all fine. Opaque means opaque. |
+
+A `meta` that breaks one of the first three is malformed input: exit 2, nothing
+appended, like every other refusal at the edge (§5).
+
+Because the cap is measured post-parse, a caller doing their own byte-budgeting
+should expect whitespace stripped and keys sorted before the measurement is taken
+— padding the literal `--meta` argument with whitespace does not spend any of the
+8 KiB; only what survives parsing does.
+
+**Compatibility.** A ledger containing `meta` needs this version or later to be
+read without silent loss: the installed v0.1.0 reads such a ledger fine — correct
+states, exit 0 — but `meta` is silently absent from every surface it prints, and
+v0.1.0 cannot write `meta` at all (no `--meta` flag; the stdin form is refused,
+which is issue #6 itself). See the CHANGELOG's Compatibility section for the full
+transcript.
+
+One honest limit. `meta` is held as a JSON object and re-emitted with its keys
+**sorted**, so key order is canonicalised on the first write. Values, types and
+nesting survive exactly, and JSON objects are unordered by definition, so nothing is
+lost that the format ever promised to keep — but if you are diffing bytes, diff them
+against the first write rather than against your input.
+
+A second honest limit, in the same spirit: if your input JSON repeats a key inside
+`meta`, the parser keeps only the last occurrence (`serde_json`'s documented
+last-wins behavior) — silently, before pinki ever sees the object.
+
+Every event may carry a `meta`, not only the record — see §4.
 
 ### The id is opaque, and that cuts both ways
 
@@ -317,9 +386,39 @@ tolerance as skipping a line it could not parse at all — that one stays fatal,
 line at a time. The distinction is "an event I have not heard of" versus "not an
 event."
 
+**`meta` on any of the four.** §1's open door is not only the record's. Amending,
+resolving and assessing carry their own provenance in an adopting system — which
+component moved this horizon, which resolved it, on whose behalf, citing what — and
+that provenance belongs to the *act*, not to the promise, so it rides the event that
+performed it:
+
+```jsonl
+{"ts":"2026-09-01T16:45:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T18:30:00Z","reason":"nudge 2","meta":{"attempt":2,"by":"expected-gap-watchdog"}}
+{"ts":"2026-09-01T16:02:11Z","type":"resolve","promise":"pnk_4f3a91","as":"satisfied","by":"…/reviewer","evidence":["https://example.org/reviews/91"],"meta":{"by":"expected-gap-watchdog","cites_ref":"sha:9c1f0e"}}
+```
+
+An escalation ladder is the clearest case: it is the thing that writes most amends, and
+it is exactly the writer with provenance to carry — which rung this is, on which
+attempt, under which policy. A ladder whose reasons survive the seam but whose
+provenance does not has been made to project away the half that says who was nudging,
+which is the gap §1 opened this door to close. `show` hands it back under the horizon it
+belongs to (`horizons[].meta`, and one line under that horizon in the text block); the
+declaration's own horizon carries none, because a promise's provenance is the record's
+`meta` and one fact should not be answerable in two places.
+
+Always last on the line, always optional, always opaque — §1's three shape rules, and
+no interpretation anywhere. The fold does not read `meta` on any event, which is a
+property you can check rather than a promise you have to take: mutate every `meta` in
+a ledger and every computed state is identical.
+
 Because state is a fold, the log is the whole system. Copy the file and you have
 copied the state. Concatenate two ledgers and you have a joined view. Truncate it
 and you have lied to yourself, which is a property, not a feature.
+
+That claim is also why `meta` exists. "The log is the whole system" is only true for
+an adopter if their row can go *into* the log whole; a seam that silently drops the
+half pinki has no field for makes it "the log is most of the system", which is a much
+weaker thing to build on.
 
 ---
 
@@ -330,9 +429,11 @@ no daemon, no server, no database.
 
 ```
 pinki promise "hand back a reviewed schema" \
-      --by reviewer --to author --until 2026-09-01T17:00Z [--on pnk_0c2b77] [--id ID]
+      --by reviewer --to author --until 2026-09-01T17:00Z [--on pnk_0c2b77] [--id ID] \
+      [--meta '{"by":"scheduler","ref":"run-4131"}']
 
-pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed late"]
+pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed late"] \
+      [--meta '{"by":"expected-gap-watchdog","attempt":2}']
 
 pinki resolve pnk_4f3a91 --satisfied --evidence https://example.org/reviews/91
 pinki resolve pnk_4f3a91 --cancelled --reason "upstream schema was withdrawn"
@@ -356,12 +457,19 @@ first, once there is more than one.
 
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
 explicit one that disagrees. `--reason` is encouraged, not required: an escalation
-ladder amends on a clock and has one reason for every rung.
+ladder amends on a clock and has one reason for every rung — and, when it carries
+provenance, one `--meta` for every rung too.
 
 `promise` mints an id unless `--id` gives it one, and an id you give it is opaque —
 § 1's id policy, enforced where the input arrives. Every other verb takes whatever id
 the ledger holds; none of them re-checks its shape, because an id that could be
 declared has to be resolvable.
+
+`--meta` takes one JSON object and is accepted by every verb that writes a line —
+`promise`, `amend`, `resolve` and `assess` (§1, §4). On the stdin form of `promise` it
+is refused rather than ignored — the record you piped in carries its own `meta`, and
+guessing between two answers is how provenance goes missing at exactly the seam this
+field exists to keep whole.
 
 The two `a2a` verbs **only write JSON to stdout**. They do not call anything. You
 pipe them into whatever A2A client you already run — that is the whole integration
@@ -412,6 +520,13 @@ pinki ledger and a party who never heard of pinki **only if pinki will hold thei
 id** — which is why § 1's id is opaque and `--id` takes whatever you already call the
 thing. A tool that insisted on minting the key would have offered a join that
 requires the disagreement to be between two copies of itself.
+
+**`meta` is not part of the join key, and must not become one.** The join above is on
+promise id and nothing else. Two parties holding the same promise will routinely
+disagree about its `meta` — each side's provenance describes its own system, which is
+the point of the field — and a join that keyed on it would report a misalignment where
+there is none. Read the other side's `meta` if it helps you understand what you are
+looking at; never diff it to decide whether the promises are the same promise.
 
 **The intermediary problem.** Burgess's objection to any third party in an
 obligation is structural, not fixable by good intentions: an intermediary that sits

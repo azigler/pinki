@@ -120,6 +120,17 @@ One key, one value: the promise record verbatim, exactly as
 [DESIGN.md § 1](DESIGN.md#1-the-record) defines it. At most one promise per Task
 under this extension.
 
+The record may also carry `meta`: an optional, opaque object that the declaring
+system uses for its own provenance
+([DESIGN.md § 1](DESIGN.md#1-the-record)). It rides the metadata block along with
+everything else, because the block is the record verbatim and `meta` is part of the
+record. **A reader of this extension must not interpret it, and must not require
+it** — treat an absent `meta` as "nothing was supplied", never as a conformance
+failure, and treat a present one as bytes belonging to somebody else's system. It is
+not a place to smuggle in extension semantics: anything this specification actually
+means belongs in this specification, under this URI, where a second implementer can
+read it.
+
 `promise.task` and `Task.id` are the same value seen from both ends. The redundancy
 is deliberate — a promise record handed to you on its own still says what it was
 about, and a Task handed to you on its own still carries its obligation.
@@ -193,7 +204,8 @@ An agent conforms if it:
 
 1. Declares the URI in `capabilities.extensions` with `required: false`.
 2. Puts at most one promise record per Task under the URI-prefixed `metadata` key,
-   in the shape [DESIGN.md § 1](DESIGN.md#1-the-record) defines.
+   in the shape [DESIGN.md § 1](DESIGN.md#1-the-record) defines — carrying the
+   record's `meta` through untouched if it has one, and never depending on it.
 3. Attaches ≥1 `Artifact` when completing a Task that carries a promise.
 4. Puts a non-empty reason in `TaskStatus.message` when rejecting or cancelling one.
 5. Never enters a task state to signal that a deadline passed.

@@ -77,6 +77,10 @@ pub struct PromiseArgs {
     /// your own id space. The `pnk_` prefix is reserved for ids pinki mints.
     #[arg(long, value_name = "ID")]
     pub id: Option<String>,
+
+    /// Opaque provenance, as a JSON object. pinki stores it and never reads it.
+    #[arg(long, value_name = "JSON")]
+    pub meta: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -97,6 +101,10 @@ pub struct AmendArgs {
     /// observer's view of a deadline is an `assess`, not an amend.
     #[arg(long, value_name = "WHO")]
     pub by: Option<String>,
+
+    /// Opaque provenance for this amendment, as a JSON object. Never read.
+    #[arg(long, value_name = "JSON")]
+    pub meta: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -135,6 +143,10 @@ pub struct ResolveArgs {
     /// to the creditor for --released. pinki records the claim; it never checks it.
     #[arg(long, value_name = "WHO")]
     pub by: Option<String>,
+
+    /// Opaque provenance for this resolve, as a JSON object. Never read.
+    #[arg(long, value_name = "JSON")]
+    pub meta: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -153,6 +165,10 @@ pub struct AssessArgs {
     /// Free text supporting the assessment.
     #[arg(long, value_name = "TEXT")]
     pub note: Option<String>,
+
+    /// Opaque provenance for this assessment, as a JSON object. Never read.
+    #[arg(long, value_name = "JSON")]
+    pub meta: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -11,7 +11,6 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
-
 ### Added
 
 - **The `amend` event, and the `amend` verb** — a deadline that moves, without a
@@ -33,6 +32,52 @@ tools can depend on them, not merely read them.
   instead of aborting the whole ledger. One unknown line no longer costs you the file.
   A line that is not an event at all is still fatal — "an event I have not heard of" and
   "not an event" are different things, and only the first is survivable.
+
+- **`meta`: one reserved, opaque object on the record — the provenance extension
+  point** ([#6](https://github.com/azigler/pinki/issues/6)). The record was a closed
+  set of seven keys, and `pinki promise` reads stdin with `deny_unknown_fields`, so an
+  existing obligation row could not be piped in without first projecting away
+  everything it carried about *provenance* — which component declared it, on whose
+  behalf, under which policy. `meta` is where that goes: an optional JSON object,
+  stored verbatim, handed back by `show`, `ls --json` and `a2a task`, and **never
+  interpreted**. Accepted on stdin (`{"promise":…,"meta":{…}}`) and as
+  `--meta '<json object>'`.
+
+  The arithmetic fields stay closed, and that is the point of the shape: state is a
+  fold over `on`, `until` and the resolve events, so a field the fold consults is a
+  field two implementations can disagree about. The fold cannot see `meta` at all —
+  tested by mutating `meta` on every event in a ledger and asserting that every
+  computed state is identical.
+
+- **`meta` on `resolve` and `assess` too**, under the same opaque rule, via `--meta`.
+  An adopting system's resolve rows carry their own provenance — which component
+  resolved this, on whose behalf, citing what — and that belongs to the act, not to
+  the promise, so it rides the event that performed it. `show --json` returns it under
+  `resolution.meta` and each `assessments[].meta`.
+
+- **`meta` on `amend` too**, by the same rule and through the same `--meta` flag:
+  `pinki amend <ID> --until ISO [--meta '<json object>']` writes it last on the amend
+  line, and `show` hands it back under the horizon it belongs to — `horizons[].meta`
+  in `--json`, one line beneath that horizon in the text block. An escalation ladder is
+  the thing that writes most amends and exactly the writer with provenance to carry
+  (which rung, which attempt, under which policy); shipping `amend` as the one
+  meta-less event would have made a ladder project away the half of its row that says
+  who was nudging. The declaration's own horizon carries no `meta` — a promise's
+  provenance is the record's, already handed back with the record. Compatibility is
+  unchanged from what the `amend` event itself already states: a ledger with an amend
+  line in it needs this version or later, whether or not that line carries `meta`.
+
+- Three shape rules at the edge, each exit 2 with nothing appended: `meta` must be an
+  object (a consumer has to be able to read the one key it knows and ignore the rest),
+  may not be empty (`{}` is provenance offered and left blank — omit it and no key is
+  written at all), and is capped at 8 KiB, measured on its canonicalized, compact
+  serialized form after parsing — not on the literal `--meta` input bytes, so a caller
+  byte-budgeting input should expect whitespace stripped and keys sorted before the
+  measurement (a ledger line is a line). Nothing *inside* it is checked: nesting,
+  arrays, nulls and unknown keys are all fine, because opaque means opaque. On the
+  stdin form of `promise`, a `--meta` flag is refused rather than silently ignored.
+  Duplicate keys inside `meta` resolve last-wins on parse (`serde_json`'s documented
+  behavior), silently.
 
 ### Changed
 
@@ -154,6 +199,36 @@ tools can depend on them, not merely read them.
   not let you declare is an id both old and new readers will still show you. It is
   your ledger; nothing here rewrites or hides a line you already have.
 
+**A ledger containing `meta` is readable by v0.1.0, and v0.1.0 will silently drop the
+`meta` from everything it prints.** Measured against the installed v0.1.0 binary on a
+meta-bearing ledger written by this version, rather than assumed:
+
+- `ls --all`, `ls --all --json`, `show`, `show --json` and `a2a task` all exit **0**
+  and report the correct states — and every one of them omits `meta`. The record's
+  `meta`, the resolve's and the assess's are simply not in the output. A v0.1.0 reader
+  cannot tell that any provenance was there.
+- Nothing is lost from the **file**. v0.1.0 appends to a meta-bearing ledger normally
+  (`resolve … --released` → rc 0), and the `meta` on the lines it did not write is
+  untouched afterwards; this version still reads it back in full.
+- v0.1.0 cannot *write* one, which is issue #6 itself: a stdin record carrying `meta`
+  is refused, rc 2, and it has no `--meta` flag either (`error: unexpected argument
+  '--meta' found`, rc 2). The stdin refusal, verbatim:
+
+  ```
+  unknown field `meta`, expected one of `id`, `promise`, `by`, `to`, `on`, `until`, `task`
+  ```
+
+So the honest statement is narrower than "old readers are fine" and narrower than
+"old readers break": **a ledger with `meta` needs this version or later to be read
+without silent loss.** Provenance is the whole reason the field exists, and a reader
+that drops it exits 0 while telling you less than the file says.
+
+One more limit, because "verbatim" should mean what it says: `meta` is stored as a
+JSON object and re-emitted with its keys **sorted**, so key order is canonicalised on
+the first write. Values, types and nesting round-trip exactly, and every read surface
+agrees byte for byte with the ledger line — but if you are diffing bytes against your
+own input, diff against the first write instead.
+
 ### Refused, on purpose
 
 - **Only the debtor may amend** (§ 8.2). An amend naming anyone else is refused with
@@ -173,6 +248,10 @@ tools can depend on them, not merely read them.
   read by the real binary, folding to the same answer the known events alone give. The
   deliberately uncovered lines at the end of `tests/cli.rs` are unchanged in kind;
   their line numbers moved.
+
+- **159 tests** — 94 unit, 65 driving the real binary — at **98.04%** line coverage
+  against CI's 97% floor. The uncovered set is eleven lines, enumerated with reasons at
+  the end of `tests/cli.rs`.
 
 ## [0.1.0] - 2026-08-28
 
