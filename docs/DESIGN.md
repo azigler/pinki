@@ -234,15 +234,54 @@ a tool that hid it would be lying to you.
 
 ## 4. The log
 
-Append-only JSONL. Three event types. State is a fold over the log.
+Append-only JSONL. Four event types. State is a fold over the log.
 
 ```jsonl
 {"ts":"2026-08-28T20:14:03Z","type":"promise","id":"pnk_4f3a91","promise":"hand back a reviewed schema","by":"…/reviewer","to":"…/author","on":"pnk_0c2b77","until":"2026-09-01T17:00:00Z"}
+{"ts":"2026-09-01T16:40:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T18:00:00Z","reason":"the draft schema landed late"}
 {"ts":"2026-09-01T16:02:11Z","type":"resolve","promise":"pnk_4f3a91","as":"satisfied","by":"…/reviewer","evidence":["https://example.org/reviews/91"]}
 {"ts":"2026-09-02T09:00:00Z","type":"assess","promise":"pnk_88de10","state":"violated","observer":"…/author","note":"nothing shipped, no reason given"}
 ```
 
 **`promise`** — speaks a promise into existence.
+
+**`amend`** — moves a promise's deadline, and nothing else. This is §8's second open
+question, settled: see §8.2 for why this shape and not the other two.
+
+The fold takes the **latest** amend's `until` as the current horizon — the one
+`overdue` is computed against, the one `ls` prints, the one that rides the A2A
+`metadata` block — and keeps **every earlier horizon**, which `show` renders in order.
+"This deadline moved twice, says who, when, and why" is one read of the record rather
+than an archaeology problem.
+
+Four properties make this small enough to belong here:
+
+- **The declaration is never rewritten.** First declaration still wins; an amend is a
+  new line beside it, not an edit to it. A re-declaration is the *silent* version of
+  this and stays refused.
+- **A reader that skips unknown event types degrades to first-wins** — the horizon the
+  promise was born with — rather than to something broken. **v0.1.0 is not such a
+  reader**: its parser refuses a ledger containing an `amend` line outright, so a
+  ledger with amends in it needs this version or later. That refusal is the reason this
+  version is the first *forward-tolerant* one: an event whose `type` it does not know
+  is read, warned about on stderr with its line number, and ignored by the fold, so the
+  next event type this format grows will not cost anyone the rest of their file. A line
+  that is not an event at all is still fatal.
+- **Only the debtor may amend.** A promise is the debtor's own declaration, so moving
+  its horizon is a new act by the same party. A *creditor* or third party who thinks a
+  deadline should move is making an assessment, which is a different speech act and
+  already has a verb. Like every rule here, this is enforced where input arrives and
+  not in the fold: pinki cannot authenticate anyone, and a joined ledger may carry an
+  amend written by something looser. The fold reads it and attributes it; the CLI
+  refuses to write it.
+- **Deadlines move both ways.** Bringing one forward is as legitimate as pushing it
+  out, and pinki has no opinion about the direction — only about the move being
+  visible.
+
+A resolved promise cannot be amended: the resolution ended it and there is no horizon
+left to move. And "latest" means last in the log, not the largest `ts` — the fold never
+compares event timestamps, because a ledger whose lines are out of order is not one
+whose clock can be trusted to sort them.
 
 **`resolve`** — ends one. Three outcomes:
 
@@ -271,6 +310,13 @@ authority pinki does not have and should not pretend to — see §6.
 **`assess`** — publishes an assessment. Author, state, timestamp, optional note.
 Never terminal: an assessed promise stays exactly as open as it was.
 
+**Unknown event types.** A reader that meets a `type` it does not know keeps the line,
+says so on stderr with its line number, and folds without it. That is not the same
+tolerance as skipping a line it could not parse at all — that one stays fatal, because
+§4's own point is that quietly dropping a line you cannot read is truncation told one
+line at a time. The distinction is "an event I have not heard of" versus "not an
+event."
+
 Because state is a fold, the log is the whole system. Copy the file and you have
 copied the state. Concatenate two ledgers and you have a joined view. Truncate it
 and you have lied to yourself, which is a property, not a feature.
@@ -279,12 +325,14 @@ and you have lied to yourself, which is a property, not a feature.
 
 ## 5. The CLI
 
-Six verbs. It should feel like a small issue tracker: push JSON in, pull JSON out,
+Seven verbs. It should feel like a small issue tracker: push JSON in, pull JSON out,
 no daemon, no server, no database.
 
 ```
 pinki promise "hand back a reviewed schema" \
       --by reviewer --to author --until 2026-09-01T17:00Z [--on pnk_0c2b77] [--id ID]
+
+pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed late"]
 
 pinki resolve pnk_4f3a91 --satisfied --evidence https://example.org/reviews/91
 pinki resolve pnk_4f3a91 --cancelled --reason "upstream schema was withdrawn"
@@ -302,7 +350,13 @@ pinki a2a task  pnk_4f3a91  # emit the Task metadata block        -> stdout
 `ls` filters over computed state: `--open` is everything not in a terminal state
 (`conditional` + `detached` + `overdue`); `--overdue` is the `overdue` subset alone.
 Terminal states (`satisfied`, `cancelled`, `released`, `expired`) are excluded from
-both and shown by `--all`.
+both and shown by `--all`. Both `ls` and `show` print the **current** horizon in
+`until`; `show` additionally lists every horizon the promise has had, declaration
+first, once there is more than one.
+
+`amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
+explicit one that disagrees. `--reason` is encouraged, not required: an escalation
+ladder amends on a clock and has one reason for every rung.
 
 `promise` mints an id unless `--id` gives it one, and an id you give it is opaque —
 § 1's id policy, enforced where the input arrives. Every other verb takes whatever id
@@ -381,14 +435,47 @@ honest thing any assessment can be.
 
 ## 8. Open questions
 
-Genuinely open. Opinions wanted — see [CONTRIBUTING.md](../CONTRIBUTING.md).
+Genuinely open, except where a number says otherwise — a settled one keeps its number
+so the answer stays where the question was. Opinions wanted — see
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 1. **The extension URI needs a permanent home.** It is provisional today
    (§ [A2A-EXTENSION.md](A2A-EXTENSION.md)). Ideally it ends up under
    `a2a-protocol.org/extensions/`, which is a process, not a decision we can make.
-2. **Moving a deadline.** Re-declare with a later `until`, or a distinct `amend`
-   event, or a new promise superseding the old one? All three are defensible. v0
-   ships none of them until someone hits the problem for real.
+2. **Moving a deadline — SETTLED: the `amend` event** (§4), on the evidence in
+   [issue #9](https://github.com/azigler/pinki/issues/9). v0 shipped none of the three
+   candidates "until someone hits the problem for real"; someone did, with
+   measurements, so here is the answer and the reasoning.
+
+   The case: a fleet's watchdog escalates a lapsed promise by re-declaring **the same
+   id** on a short clock — `until = T`, then `T+15m`, then `T+30m` — because minting a
+   fresh id per nudge leaves a permanent phantom promise behind for every rung. Against
+   the v0.1.0 fold that ladder reports `until = T` forever, and an external observer
+   scored a live promise overdue **32 minutes before the system that owned it did**. An
+   observer that disagrees with the owner about *when* a deadline fell is publishing a
+   different fact, not a second opinion on the same one.
+
+   - **Not re-declare-with-a-later-`until`.** The first-declaration-wins guard exists
+     precisely because a silent move is the problem; keeping it and adding an explicit
+     event keeps both halves — silent moves stay impossible, honest ones become
+     visible.
+   - **Not supersede-with-lineage.** It re-imposes the cost the ladder was built to
+     avoid: a routine three-step escalation manufactures three dead records plus one
+     live one, and a fleet whose escalation runs through its promise store would litter
+     its own ledger at escalation frequency. Any graph rendering then shows four nodes
+     where one obligation exists.
+   - **Amend, debtor-only.** Moving a horizon is a new act by the same party who spoke
+     the promise. The creditor sees the move — attributed, timestamped, with every
+     prior horizon still in the record — and can `assess` it, never edit it. An
+     observer's view of someone else's deadline is an assessment; that is the same
+     line §3 draws between arithmetic and judgment, and it is why an observer amend is
+     deliberately not allowed in this version.
+
+   What it buys is the property that motivated the report: with amends in the log, an
+   outside observer folds the **same current horizon** as the system that owns the
+   promise. The divergence disappears structurally instead of being reconciled after
+   the fact. What stays open underneath it is §8.3 — whether a card is the right grain
+   for `by` — since "the debtor" is only as sharp as the identity that names it.
 3. **Identity granularity.** `by` is an AgentCard identity, so an obligation binds
    the card's subject and outlives any one session. Is a card the right grain, or
    do fleets need something finer?

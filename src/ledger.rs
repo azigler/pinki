@@ -13,6 +13,13 @@
 //!   yourself — silently skipping a line you could not parse is the same lie told one
 //!   line at a time, and it would make the fold quietly wrong. The error names the
 //!   file and the 1-based line number so you can go and look at it.
+//! - **An event of an unknown `type` is loud but survivable.** That is a different
+//!   thing from a line that is not an event: it is a well-formed event this build has
+//!   not heard of, almost certainly written by a newer pinki. Refusing the whole file
+//!   over it would mean any future event type breaks every older reader on a ledger it
+//!   is otherwise perfectly able to read — so the line is kept as
+//!   [`crate::event::EventBody::Unknown`], warned about on stderr with its line number,
+//!   and ignored by the fold. Loud, not fatal, and never silent.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -20,7 +27,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-use crate::event::Event;
+use crate::event::{Event, EventBody};
 
 /// The environment variable that relocates the ledger.
 pub const ENV_VAR: &str = "PINKI_LEDGER";
@@ -111,7 +118,21 @@ pub fn read_at(path: &Path) -> Result<Vec<Event>, Error> {
             continue;
         }
         match serde_json::from_str::<Event>(line) {
-            Ok(event) => events.push(event),
+            Ok(event) => {
+                // Warned per line, with its number, because "which line was that?" is
+                // the only question a reader has here — and because a ledger a newer
+                // pinki wrote should say so once per surprising line rather than once
+                // per file.
+                if event.body == EventBody::Unknown {
+                    eprintln!(
+                        "pinki: warning: {} line {}: unknown event type, skipped — written by a \
+                         newer pinki? The fold ignores it (§4); nothing was lost from the file",
+                        path.display(),
+                        index + 1
+                    );
+                }
+                events.push(event);
+            }
             Err(source) => {
                 return Err(Error::Malformed {
                     path: path.to_path_buf(),
@@ -398,14 +419,37 @@ mod tests {
     fn a_json_line_that_is_not_a_pinki_event_is_also_malformed() {
         let scratch = Scratch::new("notevent");
         let path = scratch.join("ledger.jsonl");
-        fs::write(
-            &path,
-            "{\"ts\":\"2026-08-28T20:14:03Z\",\"type\":\"nope\"}\n",
-        )
-        .unwrap();
+        // No `ts`, and a `promise` body missing every field it needs. This is not an
+        // event of an unknown type; it is not an event.
+        fs::write(&path, "{\"type\":\"promise\"}\n").unwrap();
         assert!(matches!(
             read_at(&path).unwrap_err(),
             Error::Malformed { line: 1, .. }
         ));
+    }
+
+    #[test]
+    fn an_unknown_event_type_is_kept_and_costs_nothing_else_in_the_file() {
+        let scratch = Scratch::new("unknowntype");
+        let path = scratch.join("ledger.jsonl");
+        let good = serde_json::to_string(&promise_event("pnk_000001")).unwrap();
+        // A line a newer pinki might write. An older reader must still be able to read
+        // the promise above and below it — refusing the whole file would make every
+        // future event type a breaking change for every older reader.
+        fs::write(
+            &path,
+            format!(
+                "{good}\n{{\"ts\":\"2026-08-28T20:14:03Z\",\"type\":\"frobnicate\",\"promise\":\"pnk_000001\",\"wat\":1}}\n{good}\n"
+            ),
+        )
+        .unwrap();
+
+        let events = read_at(&path).unwrap();
+        assert_eq!(events.len(), 3, "every line is read");
+        assert_eq!(events[1].body, EventBody::Unknown);
+        // It claims no subject, so it can never be mistaken for an event about a
+        // promise — including by the id minter, which asks the log what is spoken for.
+        assert_eq!(events[1].subject(), "");
+        assert_eq!(events[1].ts, "2026-08-28T20:14:03Z");
     }
 }
