@@ -70,9 +70,9 @@ pub struct PromiseArgs {
     #[arg(long, value_name = "ID")]
     pub task: Option<String>,
 
-    /// Use this id instead of minting one. Any non-blank string with no whitespace and
-    /// no control characters, up to 128 characters — bring your own id space. The
-    /// `pnk_` prefix is reserved for ids pinki mints.
+    /// Use this id instead of minting one. Any non-blank string with no whitespace, no
+    /// control characters and no invisible characters, up to 128 characters — bring
+    /// your own id space. The `pnk_` prefix is reserved for ids pinki mints.
     #[arg(long, value_name = "ID")]
     pub id: Option<String>,
 }

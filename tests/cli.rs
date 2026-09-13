@@ -658,6 +658,74 @@ fn a_supplied_id_that_is_not_usable_as_a_handle_is_a_usage_error() {
 }
 
 #[test]
+fn a_supplied_id_may_not_hide_an_invisible_character() {
+    // §1: an id is a handle you can read, type and compare by eye. A character with
+    // the Unicode `Default_Ignorable_Code_Point` property renders as nothing, so two
+    // ids that are not equal can be indistinguishable in `ls`, in a terminal, and in
+    // a code review — and the id is the key §7's join is made on. Neither
+    // `char::is_whitespace` nor `char::is_control` is true of any of them (that is
+    // the gap this test exists for), so the property has to be its own rule.
+    let scratch = Scratch::new();
+    scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    let before = fs::read(scratch.ledger()).expect("a ledger to compare against");
+
+    for (id, what) in [
+        ("pr-9\u{200B}1", "U+200B ZERO WIDTH SPACE"),
+        ("pr-9\u{FEFF}1", "U+FEFF ZERO WIDTH NO-BREAK SPACE (BOM)"),
+        ("pr-9\u{2060}1", "U+2060 WORD JOINER"),
+        ("pr-9\u{E0001}1", "U+E0001 LANGUAGE TAG"),
+    ] {
+        let run = scratch.run(&[
+            "promise",
+            "send a different schema",
+            "--by",
+            "author",
+            "--to",
+            "reviewer",
+            "--until",
+            FUTURE,
+            "--id",
+            id,
+        ]);
+        run.expect(2);
+        assert!(
+            run.stderr.contains("§1"),
+            "the refusal cites the rule for {what}: {:?}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("Default_Ignorable_Code_Point"),
+            "the refusal names the property for {what}: {:?}",
+            run.stderr
+        );
+        assert_eq!(
+            fs::read(scratch.ledger()).expect("the ledger is still there"),
+            before,
+            "the ledger must be byte-identical after refusing {what}"
+        );
+    }
+
+    // The positive control, and the reason this is a property rather than a ban on
+    // non-ASCII: an id in another script holds nothing invisible and is fine.
+    for id in ["υπόσχεση-91", "約束-91", "promesse-91"] {
+        let run = scratch.run(&[
+            "promise",
+            "ship it",
+            "--by",
+            "author",
+            "--to",
+            "publisher",
+            "--until",
+            FUTURE,
+            "--id",
+            id,
+        ]);
+        run.expect(0);
+        assert_eq!(run.id(), id);
+    }
+}
+
+#[test]
 fn a_supplied_id_is_bounded_at_128_characters() {
     let scratch = Scratch::new();
     let declare = |id: &str| {
@@ -1764,12 +1832,12 @@ fn a2a_task_for_an_unknown_id_fails_operationally() {
 //   src/state.rs 270   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
-//   src/verbs.rs 602   `_ => None` over `view.assessments`, which `fold` fills only
+//   src/verbs.rs 603   `_ => None` over `view.assessments`, which `fold` fills only
 //                      from `EventBody::Assess` events.
 //
 // Unreachable from a test harness:
 //
-//   src/verbs.rs 232   the `io::stdin().is_terminal()` refusal. A child spawned by a
+//   src/verbs.rs 233   the `io::stdin().is_terminal()` refusal. A child spawned by a
 //                      test never has a tty on stdin, and giving it one would mean a
 //                      pty dependency — which Cargo.toml exists to refuse. Exercised
 //                      by hand: `pinki promise` at a prompt.

@@ -9,11 +9,12 @@
 //!   handle for a human-scale ledger, and collisions are handled by *asking the
 //!   ledger* rather than by pretending the space is big enough. Minting takes the set
 //!   of ids already present and retries until it finds a free one.
-//! - **Supplied**, when `--id` is given: any non-blank string with no whitespace and
-//!   no control characters, up to [`MAX_SUPPLIED_LEN`] characters — see
-//!   [`check_supplied`]. An adopter arriving with an id space already referenced from
-//!   somewhere else carries it in rather than maintaining a mapping, and §7's ledger
-//!   join can then key across parties who did not both mint here.
+//! - **Supplied**, when `--id` is given: any non-blank string with no whitespace, no
+//!   control characters and no invisible ones ([`DEFAULT_IGNORABLE`]), up to
+//!   [`MAX_SUPPLIED_LEN`] characters — see [`check_supplied`]. An adopter arriving
+//!   with an id space already referenced from somewhere else carries it in rather
+//!   than maintaining a mapping, and §7's ledger join can then key across parties who
+//!   did not both mint here.
 //!
 //! The one thing a supplied id may not be is a *malformed* minted id: `pnk_` is
 //! reserved for the space this module mints, so `pnk_` followed by anything that is
@@ -120,6 +121,53 @@ pub fn is_well_formed(id: &str) -> bool {
     }
 }
 
+/// Every character with the Unicode `Default_Ignorable_Code_Point` property, as
+/// closed ranges.
+///
+/// Transcribed from `DerivedCoreProperties.txt` of **Unicode 16.0.0** (dated
+/// 2024-05-31); the file's 27 rows for this property are coalesced here into the 17
+/// ranges they form, 4,174 code points in total. The property is the one Unicode
+/// itself defines for "should render as nothing when unsupported" — zero-width
+/// spaces and joiners, the bidi controls, variation selectors, the tag characters,
+/// soft hyphen, the Hangul fillers — which is exactly the class of character that
+/// makes two unequal ids look identical.
+///
+/// A range table rather than a crate: `Cargo.toml`'s dependency list is DESIGN.md
+/// §7's no-network invariant, so every crate has to earn itself, and this one would
+/// buy seventeen lines. The cost of the table is that a future Unicode version
+/// adding to the property is not picked up until someone updates it — additions are
+/// rare (the set has been these same 4,174 code points since Unicode 14.0, whose one
+/// addition to it was U+180F), and the failure mode is the old behavior for a new
+/// code point, not a wrong answer for an existing one.
+const DEFAULT_IGNORABLE: [(char, char); 17] = [
+    ('\u{00AD}', '\u{00AD}'),   // SOFT HYPHEN
+    ('\u{034F}', '\u{034F}'),   // COMBINING GRAPHEME JOINER
+    ('\u{061C}', '\u{061C}'),   // ARABIC LETTER MARK
+    ('\u{115F}', '\u{1160}'),   // HANGUL CHOSEONG/JUNGSEONG FILLER
+    ('\u{17B4}', '\u{17B5}'),   // KHMER VOWEL INHERENT AQ..AA
+    ('\u{180B}', '\u{180F}'),   // MONGOLIAN FREE VARIATION SELECTORS, VOWEL SEPARATOR
+    ('\u{200B}', '\u{200F}'),   // ZERO WIDTH SPACE..RIGHT-TO-LEFT MARK
+    ('\u{202A}', '\u{202E}'),   // the bidi embedding/override controls
+    ('\u{2060}', '\u{206F}'),   // WORD JOINER..NOMINAL DIGIT SHAPES
+    ('\u{3164}', '\u{3164}'),   // HANGUL FILLER
+    ('\u{FE00}', '\u{FE0F}'),   // VARIATION SELECTOR-1..16
+    ('\u{FEFF}', '\u{FEFF}'),   // ZERO WIDTH NO-BREAK SPACE (the BOM)
+    ('\u{FFA0}', '\u{FFA0}'),   // HALFWIDTH HANGUL FILLER
+    ('\u{FFF0}', '\u{FFF8}'),   // reserved, property-assigned
+    ('\u{1BCA0}', '\u{1BCA3}'), // SHORTHAND FORMAT controls
+    ('\u{1D173}', '\u{1D17A}'), // MUSICAL SYMBOL BEGIN BEAM..END PHRASE
+    ('\u{E0000}', '\u{E0FFF}'), // the tag characters and variation selectors 17..256
+];
+
+/// Does this character have the Unicode `Default_Ignorable_Code_Point` property?
+fn is_default_ignorable(c: char) -> bool {
+    // Nothing below U+00AD is in the table, which is every id anybody actually has.
+    c >= DEFAULT_IGNORABLE[0].0
+        && DEFAULT_IGNORABLE
+            .iter()
+            .any(|&(low, high)| (low..=high).contains(&c))
+}
+
 /// The longest id `--id` will accept, in characters.
 ///
 /// A bound rather than a taste: the id is a column in `ls`, the first field of the
@@ -143,6 +191,10 @@ pub enum SuppliedIdError {
     Whitespace,
     /// Holds a control character.
     Control,
+    /// Holds a character with the Unicode `Default_Ignorable_Code_Point` property —
+    /// one that renders as nothing. Carries the character, since naming it is the
+    /// only way the caller can see it.
+    Ignorable(char),
     /// Longer than [`MAX_SUPPLIED_LEN`] characters. Carries the length it had.
     TooLong(usize),
     /// Wears the `pnk_` prefix without being an id this module could have minted.
@@ -165,6 +217,15 @@ impl fmt::Display for SuppliedIdError {
                 "an id may not contain control characters: §1's id is a handle meant to be read \
                  and typed, and one that can move a terminal's cursor is not that. Nothing was \
                  appended",
+            ),
+            SuppliedIdError::Ignorable(c) => write!(
+                f,
+                "an id may not contain U+{:04X}, a character with the Unicode \
+                 Default_Ignorable_Code_Point property: it renders as nothing, so two ids \
+                 that are not equal can look identical in `pinki ls`, in a terminal, and to \
+                 whoever is reading the ledger — and §1's id is a handle those readings are \
+                 of, and §7's join key. Nothing was appended",
+                *c as u32
             ),
             SuppliedIdError::TooLong(length) => write!(
                 f,
@@ -190,6 +251,10 @@ impl std::error::Error for SuppliedIdError {}
 /// that keep it usable *as* a handle, plus the reserved prefix. Call it on the
 /// trimmed value — leading and trailing whitespace is the caller's shell, not their
 /// id.
+///
+/// "Usable as a handle" includes being *visible*: an id carrying a
+/// [`DEFAULT_IGNORABLE`] character is refused, because two ids that are not equal
+/// must not be able to look equal.
 pub fn check_supplied(id: &str) -> Result<(), SuppliedIdError> {
     if id.is_empty() {
         return Err(SuppliedIdError::Blank);
@@ -200,6 +265,13 @@ pub fn check_supplied(id: &str) -> Result<(), SuppliedIdError> {
         }
         if c.is_control() {
             return Err(SuppliedIdError::Control);
+        }
+        // Not covered by either check above: `char::is_whitespace` is the White_Space
+        // property (U+200B is not one, despite its name) and `char::is_control` is the
+        // Cc category, while these are mostly Cf. An invisible character in a key is
+        // its own rule because it defeats the eye rather than the terminal.
+        if is_default_ignorable(c) {
+            return Err(SuppliedIdError::Ignorable(c));
         }
     }
     let length = id.chars().count();
@@ -328,6 +400,78 @@ mod tests {
             Err(SuppliedIdError::Control)
         );
         assert_eq!(check_supplied("del\u{7f}"), Err(SuppliedIdError::Control));
+    }
+
+    #[test]
+    fn a_supplied_id_may_not_hold_an_invisible_character() {
+        // A spread across the property, and — asserted first, because it is the whole
+        // reason this rule exists — none of them is caught by either check above:
+        // `is_whitespace()` is the White_Space property (U+200B is not one, despite
+        // the name) and `is_control()` is the Cc category.
+        for (id, c) in [
+            ("pr-9\u{200B}1", '\u{200B}'),   // ZERO WIDTH SPACE
+            ("pr-9\u{200C}1", '\u{200C}'),   // ZERO WIDTH NON-JOINER
+            ("pr-9\u{200D}1", '\u{200D}'),   // ZERO WIDTH JOINER
+            ("pr-9\u{FEFF}1", '\u{FEFF}'),   // ZERO WIDTH NO-BREAK SPACE (BOM)
+            ("pr-9\u{2060}1", '\u{2060}'),   // WORD JOINER
+            ("pr-9\u{00AD}1", '\u{00AD}'),   // SOFT HYPHEN
+            ("pr-9\u{202E}1", '\u{202E}'),   // RIGHT-TO-LEFT OVERRIDE
+            ("pr-9\u{FE0F}1", '\u{FE0F}'),   // VARIATION SELECTOR-16
+            ("pr-9\u{E0001}1", '\u{E0001}'), // LANGUAGE TAG
+        ] {
+            assert!(!c.is_whitespace() && !c.is_control(), "U+{:04X}", c as u32);
+            assert_eq!(
+                check_supplied(id),
+                Err(SuppliedIdError::Ignorable(c)),
+                "{c:?}"
+            );
+        }
+
+        // The message names the code point — the only way to see a character that
+        // renders as nothing — and the property, and cites §1.
+        let message = SuppliedIdError::Ignorable('\u{200B}').to_string();
+        assert!(message.contains("U+200B"), "{message}");
+        assert!(
+            message.contains("Default_Ignorable_Code_Point"),
+            "{message}"
+        );
+        assert!(message.contains("§1"), "{message}");
+        assert!(message.contains("Nothing was appended"), "{message}");
+
+        // Not a ban on non-ASCII: a script is not an invisible character.
+        for id in ["υπόσχεση-91", "約束-91", "Ω", "ñ-1", "pr-٩١"] {
+            assert_eq!(check_supplied(id), Ok(()), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_ignorable_table_is_the_property_it_claims_to_be() {
+        // A transcribed table earns one structural check, because a typo in it is
+        // silent: sorted, non-overlapping, non-adjacent (adjacent ranges would mean
+        // the coalescing was not carried through), and the total the UCD gives.
+        let mut total = 0usize;
+        for (i, &(low, high)) in DEFAULT_IGNORABLE.iter().enumerate() {
+            assert!(low <= high, "range {i} is inverted");
+            if i > 0 {
+                let previous = DEFAULT_IGNORABLE[i - 1].1;
+                assert!(
+                    low as u32 > previous as u32 + 1,
+                    "range {i} is not disjoint from, and clear of, the one before it"
+                );
+            }
+            total += (high as u32 - low as u32 + 1) as usize;
+            assert!(is_default_ignorable(low) && is_default_ignorable(high));
+        }
+        assert_eq!(total, 4174, "Unicode 16.0.0's Default_Ignorable_Code_Point");
+
+        // And the boundaries hold on both sides of the first and last ranges.
+        assert!(!is_default_ignorable('\u{00AC}'));
+        assert!(!is_default_ignorable('\u{00AE}'));
+        assert!(!is_default_ignorable('\u{E1000}'));
+        assert!(!is_default_ignorable('a'));
+        // U+2028/2029 are separators, not ignorables — `is_whitespace` has them.
+        assert!(!is_default_ignorable('\u{2028}'));
+        assert!('\u{2028}'.is_whitespace());
     }
 
     #[test]

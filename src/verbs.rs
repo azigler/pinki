@@ -139,9 +139,10 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
     // §1's id policy, checked before the ledger is consulted for the same reason
     // `--until` is: an id pinki will not accept is malformed whether or not the ledger
     // happens to hold it. A supplied id is *opaque* — any non-blank string with no
-    // whitespace and no control characters, bounded, and not squatting the minted
-    // `pnk_` namespace — because an adopter's existing ids are already referenced from
-    // elsewhere, and §7's join needs both parties' keys, not pinki-minted ones.
+    // whitespace, no control characters and no invisible ones, bounded, and not
+    // squatting the minted `pnk_` namespace — because an adopter's existing ids are
+    // already referenced from elsewhere, and §7's join needs both parties' keys, not
+    // pinki-minted ones.
     let supplied = match incoming.id {
         Some(given) => {
             let given = given.trim().to_string();

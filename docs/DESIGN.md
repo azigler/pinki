@@ -69,8 +69,8 @@ There is exactly one id field, and it holds one of two things:
   hex digits. Short and typeable, and minted by asking the ledger which ids are
   already spoken for rather than by trusting the size of the space.
 - **An id you brought with you**, via `pinki promise --id` (or `"id"` in the record
-  on stdin): any non-blank string with no whitespace and no control characters, up to
-  128 characters.
+  on stdin): any non-blank string with no whitespace, no control characters and no
+  invisible characters, up to 128 characters.
 
 The permissiveness is the point. Anyone arriving with an existing obligation ledger
 has an id space that other systems already reference, and an `--id` that refuses it
@@ -80,12 +80,24 @@ wants the same thing from the other direction: it is keyed by promise id, so two
 parties who did not both mint here can only key it if pinki will hold the key they
 share.
 
-Three rules, and they are the only ones:
+Four rules, and they are the only ones:
 
 - **No whitespace, no control characters, and not blank.** The id is a column in
   `pinki ls`, the first field of the tab-separated line every mutating verb prints,
   and the key two ledgers are joined on. Those are the uses; these are the rules that
   keep them working. Nothing else about the shape is pinki's business.
+- **No invisible characters.** A character with the Unicode
+  **`Default_Ignorable_Code_Point`** property — zero-width spaces and joiners, the
+  bidi controls, variation selectors, tag characters, soft hyphen, the Hangul fillers
+  — is refused. This is its own rule because neither of the two above catches it:
+  U+200B ZERO WIDTH SPACE is `White_Space=No` despite the name, and none of these are
+  control characters. Without it, two ids that are **not equal** can be
+  **indistinguishable** — in `pinki ls`, in a terminal, in a code review, and to
+  whoever is deciding whether the join in § 7 matched. An identifier whose equality
+  the eye cannot check is not a handle. Non-ASCII is otherwise entirely fine: this is
+  a rule about invisibility, not about script. (The set is Unicode 16.0.0's, carried
+  as a 17-range table in `src/id.rs`; a later Unicode version that adds to the
+  property needs that table updated.)
 - **At most 128 characters.** A bound rather than a taste — a UUID is 36, a URN
   comfortably under 100 — chosen so a ledger line stays something a human reads with
   `less`. It is not a claim that 129 would be meaningless; it is a refusal to let the

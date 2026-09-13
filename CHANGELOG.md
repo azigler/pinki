@@ -16,7 +16,8 @@ tools can depend on them, not merely read them.
 - **`--id` accepts an id you already have.** It used to refuse anything that was not
   `pnk_` plus six lowercase hex digits, which made the one affordance that looks like
   "carry your ledger over" not be one. A supplied id is now opaque: any non-blank
-  string with no whitespace and no control characters, up to 128 characters. Minting
+  string with no whitespace, no control characters and no invisible characters, up to
+  128 characters. Minting
   is untouched — leave `--id` off and you get a `pnk_` id exactly as before — and the
   stdin record's `"id"` takes the same forms, by the same code. Closes
   [#5](https://github.com/azigler/pinki/issues/5).
@@ -34,6 +35,25 @@ tools can depend on them, not merely read them.
   works. And uniqueness is unchanged and non-negotiable — declaring an id the ledger
   already declares is refused with § 4's first-declaration-wins message whether it was
   minted or supplied, which is the collision check the six-hex space never really had.
+
+- **An id may not contain an invisible character.** A supplied id holding a character
+  with the Unicode **`Default_Ignorable_Code_Point`** property — zero-width spaces and
+  joiners, the bidi controls, variation selectors, tag characters, soft hyphen, the
+  Hangul fillers — is refused (exit 2, nothing appended, message citing § 1 and naming
+  the code point, which is the only way to see a character that renders as nothing).
+
+  It is its own rule because neither of the other two catches it: U+200B ZERO WIDTH
+  SPACE is `White_Space=No` in Unicode despite its name, and none of these are control
+  characters, so `char::is_whitespace()` and `char::is_control()` are both `false`.
+  Without the rule, two ids that are **not equal** can be **indistinguishable** — in
+  `pinki ls`, in a terminal, in a code review, and to whoever is deciding whether § 7's
+  join matched. An identifier whose equality the eye cannot check is not a handle.
+
+  Non-ASCII is otherwise entirely fine, and tested: `υπόσχεση-91` and `約束-91` are
+  accepted. This is a rule about invisibility, not about script. The set is Unicode
+  16.0.0's (`DerivedCoreProperties.txt`), carried as a 17-range table in `src/id.rs`
+  rather than a new dependency — Cargo.toml's list is DESIGN.md § 7's no-network
+  invariant, so a crate has to earn itself, and this one would buy seventeen lines.
 
 - **`pnk_` is reserved for minted ids.** A supplied id wearing that prefix without
   being six lowercase hex digits is refused (exit 2, nothing appended). The
@@ -75,6 +95,16 @@ tools can depend on them, not merely read them.
   So the upgrade is one-directional in exactly one place: a ledger with foreign ids in
   it can be read by an old reader and *appended to* by an old reader; it just cannot
   have had that first line written by one.
+
+- **The invisible-character rule is a check on input too, and worth saying plainly.**
+  It refuses a *declaration*; it does not retro-validate a ledger. A row whose id
+  already holds an invisible character — written by another implementation, by a hand
+  edit, or by an earlier build of this branch — is still read, shown, resolved and
+  assessed by **this** version, because no read path re-checks an id's shape. An old
+  reader reads it too, for the same reason it reads any other foreign id. The
+  asymmetry is therefore the same one as above and no bigger: an id this version will
+  not let you declare is an id both old and new readers will still show you. It is
+  your ledger; nothing here rewrites or hides a line you already have.
 
 ## [0.1.0] - 2026-08-28
 
