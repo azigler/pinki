@@ -91,12 +91,22 @@ impl Scratch {
             .expect("spawn pinki");
 
         if let Some(text) = stdin {
-            child
+            // A child that refuses its arguments exits before it ever reads stdin, and
+            // the pipe then breaks under this write. That early exit is the behaviour
+            // some tests exist to observe (`--meta` beside a record on stdin is refused
+            // before the record is read), so a broken pipe here is the child declining
+            // the input, not the harness failing — and which side wins the race is the
+            // scheduler's call, not the test's (it lost once on CI, never locally).
+            match child
                 .stdin
                 .as_mut()
                 .expect("stdin pipe")
                 .write_all(text.as_bytes())
-                .expect("write stdin");
+            {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => panic!("write stdin: {e}"),
+            }
         }
 
         let output = child.wait_with_output().expect("wait for pinki");
