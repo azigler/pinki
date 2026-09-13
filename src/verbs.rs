@@ -136,20 +136,31 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
     let to = non_blank(&incoming.to, "`to`")?;
     let until = parse_until(&incoming.until)?;
 
+    // §1's id policy, checked before the ledger is consulted for the same reason
+    // `--until` is: an id pinki will not accept is malformed whether or not the ledger
+    // happens to hold it. A supplied id is *opaque* — any non-blank string with no
+    // whitespace and no control characters, bounded, and not squatting the minted
+    // `pnk_` namespace — because an adopter's existing ids are already referenced from
+    // elsewhere, and §7's join needs both parties' keys, not pinki-minted ones.
+    let supplied = match incoming.id {
+        Some(given) => {
+            let given = given.trim().to_string();
+            id::check_supplied(&given)
+                .map_err(|e| Fail::Usage(format!("`{given}` will not do as an id: {e}")))?;
+            Some(given)
+        }
+        None => None,
+    };
+
     let mut events = read_ledger()?;
     let now = now_to_the_second();
 
-    let id = match incoming.id {
+    let id = match supplied {
+        // Being permissive about the *shape* is safe because uniqueness is not
+        // negotiable: this is §4's first-declaration-wins guard, and it does not care
+        // which space the id came from. A supplied id that collides with one pinki
+        // minted earlier is refused by exactly this line.
         Some(given) => {
-            let given = given.trim().to_string();
-            if !id::is_well_formed(&given) {
-                return Err(Fail::Usage(format!(
-                    "`{given}` is not a well-formed promise id: expected `{}` followed by exactly \
-                     six lowercase hex digits, e.g. `{}4f3a91`",
-                    id::PREFIX,
-                    id::PREFIX
-                )));
-            }
             if fold(&events, now).get(&given).is_some() {
                 return Err(Fail::Op(format!(
                     "`{given}` is already declared in {} — ids are stable, so pinki will not \
@@ -708,14 +719,22 @@ fn report(events: &[Event], now: Timestamp, id: &str) {
     println!("{id}\t{state}");
 }
 
+/// An id nothing in the ledger declares.
+///
+/// The hint is narrow on purpose. Since §1 admits a caller's own id, "this does not
+/// look like a pinki id" is no longer evidence of anything — a fleet's own id space is
+/// a perfectly good id here. The one shape that still earns a remark is an id wearing
+/// the reserved `pnk_` prefix without being a minted one: that one could never have
+/// been declared, by any route, so it is a typo rather than a lookup miss.
 fn unknown_id(id: &str, verb: &str) -> Fail {
-    let hint = if id::is_well_formed(id) {
-        String::new()
-    } else {
+    let hint = if id.starts_with(id::PREFIX) && !id::is_well_formed(id) {
         format!(
-            " (and `{id}` is not even a well-formed pinki id — those are `{}` plus six hex digits)",
+            " (and `{id}` could never have been declared: `{}` is reserved for minted ids, \
+             which are the prefix plus exactly six lowercase hex digits)",
             id::PREFIX
         )
+    } else {
+        String::new()
     };
     Fail::Op(format!(
         "cannot {verb} `{id}`: nothing in {} declares it{hint}",
