@@ -11,6 +11,77 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Added
+
+- **The `amend` event, and the `amend` verb** — a deadline that moves, without a
+  silent move and without a phantom record per move. `pinki amend <ID> --until ISO
+  [--reason TEXT] [--by WHO]` appends `{"type":"amend","promise":…,"by":…,"until":…}`
+  beside the declaration; the fold takes the latest amend's `until` as the current
+  horizon and keeps every earlier one, which `show` lists in order (text and
+  `--json`'s `horizons`). `ls`, `show` and the A2A `metadata` block all carry the
+  horizon as it stands, so an outside observer computes the same `overdue` as the
+  fleet that owns the promise. Closes
+  [#9](https://github.com/azigler/pinki/issues/9), which arrived with the
+  measurement that motivates it: an escalation ladder re-declaring the same id had an
+  observer scoring a live promise overdue 32 minutes before its owner did.
+- **DESIGN.md § 8's second open question is settled** — the `amend` event, not
+  re-declaration and not supersede-with-lineage, with the reasoning and the rejected
+  alternatives recorded in place (§ 4 and § 8.2).
+- **Forward tolerance for event types.** An event whose `type` this build does not know
+  is now read, warned about on stderr with its line number, and ignored by the fold,
+  instead of aborting the whole ledger. One unknown line no longer costs you the file.
+  A line that is not an event at all is still fatal — "an event I have not heard of" and
+  "not an event" are different things, and only the first is survivable.
+
+### Changed
+
+- **The deadline in `ls`, `show` and `a2a task` is the current one**, not the
+  declared one, once a promise has been amended. The declaration itself is never
+  rewritten: `first declaration wins` is unchanged, and a fold that skips `amend`
+  events still answers what it answered before — the declared horizon.
+
+### Compatibility
+
+- **A ledger containing an `amend` line requires this version or later. v0.1.0 refuses
+  it — the whole file, not the line.** Measured, not assumed:
+
+  ```console
+  $ pinki --version
+  pinki 0.1.0
+  $ PINKI_LEDGER=./with-amends.jsonl pinki ls --all
+  pinki: ledger ./with-amends.jsonl: line 2 is not a valid pinki event: unknown
+  variant `amend`, expected one of `promise`, `resolve`, `assess`
+  $ echo $?
+  1
+  ```
+
+  Its parser has no fallback for an unknown `type`, and a line that will not parse is
+  fatal to the read. So this is **breaking for old readers**, though not for the record
+  shape: the `promise` event is byte-identical to what v0.1.0 wrote, and an old reader
+  handed a ledger with no amends in it is unaffected. The forward-tolerance above is
+  the fix going forward, and it can only ever help the *next* event type — it cannot
+  reach backwards into a binary already installed.
+
+### Refused, on purpose
+
+- **Only the debtor may amend** (§ 8.2). An amend naming anyone else is refused with
+  the rule cited and nothing appended; an observer who thinks a deadline should move
+  is making an assessment, which is a different speech act with its own verb. Like
+  every other rule here this is enforced where input arrives, never in the fold —
+  pinki authenticates nobody, and a joined ledger may carry an amend written by
+  something looser.
+- **A resolved promise cannot be amended.** The first resolve wins and ends it; there
+  is no horizon left to move.
+
+### Testing
+
+- **158 tests** — 96 unit, 62 driving the real binary — including the three-step
+  escalation ladder from #9 end to end, and the forward-tolerance property tested
+  where it actually lives: a real ledger *file* carrying a line of an unknown type,
+  read by the real binary, folding to the same answer the known events alone give. The
+  deliberately uncovered lines at the end of `tests/cli.rs` are unchanged in kind;
+  their line numbers moved.
+
 ## [0.1.0] - 2026-08-28
 
 The nucleus: enough of pinki to actually use, and enough tests to believe it.
