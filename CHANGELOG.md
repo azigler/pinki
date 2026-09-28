@@ -11,6 +11,15 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Added
+
+- **`pinki export`** — a versioned, read-only JSON view of every promise for
+  visualizers, or one promise per line with `--format jsonl`. It carries the current
+  and original deadlines, amendments, resolution, assessments and their provenance.
+  Filters select computed state, debtor, creditor and declaration time; `--now`
+  fixes the overdue boundary for reproducible output. The export reports what the
+  fold knows and leaves judgments attributed to their observers.
+
 ## [0.2.0] - 2026-09-13
 
 The first release shaped by adoption. Three issues filed by a fleet trying to run its

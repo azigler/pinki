@@ -2784,6 +2784,339 @@ fn the_fold_ignores_meta_on_every_event() {
     );
 }
 
+// ------------------------------------------------------------------ export
+
+const EXPORT_NOW: &str = "2026-09-01T12:00:00Z";
+
+#[test]
+fn export_empty_ledger_is_a_versioned_document_and_does_not_create_a_file() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&["export", "--now", EXPORT_NOW]);
+    run.expect(0);
+    let document = run.json();
+    assert_eq!(document.as_object().unwrap().len(), 4);
+    assert_eq!(document["format"], "pinki-export");
+    assert_eq!(document["version"], 1);
+    assert_eq!(document["summary"]["total"], 0);
+    assert_eq!(document["promises"], serde_json::json!([]));
+    let states = document["summary"]["states"].as_object().unwrap();
+    assert_eq!(states.len(), 7);
+    assert!(states.values().all(|count| count == 0));
+    assert_eq!(
+        run.stdout,
+        scratch.run(&["export", "--now", EXPORT_NOW]).stdout
+    );
+    assert_eq!(scratch.run(&["export", "--format", "jsonl"]).stdout, "");
+    assert!(
+        !scratch.ledger().exists(),
+        "export must not create a ledger"
+    );
+}
+
+#[test]
+fn export_carries_the_full_history_and_provenance_in_both_formats() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&[
+            "promise",
+            "send the draft",
+            "--id",
+            "root",
+            "--by",
+            "author",
+            "--to",
+            "reviewer",
+            "--until",
+            FUTURE,
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "promise",
+            "hand back a review",
+            "--id",
+            "review",
+            "--by",
+            "reviewer",
+            "--to",
+            "author",
+            "--on",
+            "root",
+            "--until",
+            "2026-09-02T00:00:00Z",
+            "--task",
+            "a2a-91",
+            "--meta",
+            r#"{"source":"fleet"}"#,
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "amend",
+            "review",
+            "--until",
+            "2026-09-03T00:00:00Z",
+            "--reason",
+            "draft late",
+            "--meta",
+            r#"{"attempt":1}"#,
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "amend",
+            "review",
+            "--until",
+            "2026-09-04T00:00:00Z",
+            "--reason",
+            "new window",
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "assess",
+            "review",
+            "--violated",
+            "--observer",
+            "author",
+            "--note",
+            "late",
+            "--meta",
+            r#"{"source":"observer"}"#,
+        ])
+        .expect(0);
+    scratch
+        .run(&["assess", "review", "--violated", "--observer", "publisher"])
+        .expect(0);
+    scratch
+        .run(&[
+            "resolve",
+            "review",
+            "--satisfied",
+            "--evidence",
+            "sha:abc",
+            "--meta",
+            r#"{"source":"resolver"}"#,
+        ])
+        .expect(0);
+    scratch.rewrite(|n, event| {
+        event.insert(
+            "ts".into(),
+            serde_json::json!(
+                [
+                    "2026-08-28T00:00:00Z",
+                    "2026-08-29T00:00:00Z",
+                    "2026-09-03T00:00:00Z",
+                    "2026-09-02T00:00:00Z",
+                    "2026-09-05T00:00:00Z",
+                    "2026-09-04T00:00:00Z",
+                    "2026-09-06T00:00:00Z",
+                ][n]
+            ),
+        );
+    });
+    let before = scratch.lines();
+    let args = ["export", "--now", EXPORT_NOW];
+    let first = scratch.run(&args);
+    first.expect(0);
+    assert_eq!(
+        first.stdout,
+        scratch.run(&args).stdout,
+        "fixed now fixes bytes"
+    );
+    let document = first.json();
+    assert_eq!(document["summary"]["total"], 2);
+    assert_eq!(document["summary"]["states"]["satisfied"], 1);
+    assert_eq!(document["summary"]["states"]["detached"], 1);
+    let rows = document["promises"].as_array().unwrap();
+    assert_eq!(rows[0]["id"], "root");
+    let review = &rows[1];
+    assert_eq!(review["id"], "review");
+    assert_eq!(review["promise"], "hand back a review");
+    assert_eq!(review["by"], "reviewer");
+    assert_eq!(review["to"], "author");
+    assert_eq!(review["on"], "root");
+    assert_eq!(review["task"], "a2a-91");
+    assert_eq!(review["meta"]["source"], "fleet");
+    assert_eq!(
+        review["until"], "2026-09-04T00:00:00Z",
+        "last log amend wins"
+    );
+    assert_eq!(review["original_until"], "2026-09-02T00:00:00Z");
+    assert_eq!(review["created_at"], "2026-08-29T00:00:00Z");
+    assert_eq!(review["state"], "satisfied");
+    let amendments = review["amendments"].as_array().unwrap();
+    assert_eq!(amendments.len(), 2);
+    assert_eq!(amendments[0]["at"], "2026-09-02T00:00:00Z");
+    assert_eq!(amendments[0]["until"], "2026-09-04T00:00:00Z");
+    assert_eq!(amendments[0]["reason"], "new window");
+    assert_eq!(amendments[1]["at"], "2026-09-03T00:00:00Z");
+    assert_eq!(amendments[1]["meta"]["attempt"], 1);
+    assert_eq!(review["resolution"]["as"], "satisfied");
+    assert_eq!(review["resolution"]["by"], "reviewer");
+    assert_eq!(
+        review["resolution"]["evidence"],
+        serde_json::json!(["sha:abc"])
+    );
+    assert_eq!(review["resolution"]["at"], "2026-09-06T00:00:00Z");
+    assert_eq!(review["resolution"]["meta"]["source"], "resolver");
+    let assessments = review["assessments"].as_array().unwrap();
+    assert_eq!(assessments.len(), 2);
+    assert_eq!(assessments[0]["observer"], "publisher");
+    assert_eq!(assessments[1]["observer"], "author");
+    assert_eq!(assessments[1]["state"], "violated");
+    assert_eq!(assessments[1]["note"], "late");
+    assert_eq!(assessments[1]["meta"]["source"], "observer");
+
+    let jsonl = scratch.run(&["export", "--format", "jsonl", "--now", EXPORT_NOW]);
+    jsonl.expect(0);
+    let lines: Vec<serde_json::Value> = jsonl
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        lines, *rows,
+        "JSONL has the same promise objects, no summary line"
+    );
+    assert_eq!(scratch.lines(), before, "export never appends");
+}
+
+#[test]
+fn export_filters_combine_and_since_is_inclusive() {
+    let scratch = Scratch::new();
+    for (id, by, to, until) in [
+        ("a", "alice", "bob", PAST),
+        ("b", "alice", "carol", FUTURE),
+        ("c", "dana", "bob", FUTURE),
+    ] {
+        scratch
+            .run(&[
+                "promise", id, "--id", id, "--by", by, "--to", to, "--until", until,
+            ])
+            .expect(0);
+    }
+    scratch
+        .run(&["resolve", "c", "--cancelled", "--reason", "withdrawn"])
+        .expect(0);
+    scratch.rewrite(|n, event| {
+        event.insert(
+            "ts".into(),
+            serde_json::json!(
+                [
+                    "2026-08-28T00:00:00Z",
+                    "2026-08-29T00:00:00Z",
+                    "2026-08-30T00:00:00Z",
+                    "2026-08-31T00:00:00Z",
+                ][n]
+            ),
+        );
+    });
+    let ids = |args: &[&str]| -> Vec<String> {
+        scratch.run(args).expect(0).json()["promises"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        ids(&["export", "--now", EXPORT_NOW, "--state", "overdue"]),
+        ["a"]
+    );
+    assert_eq!(
+        ids(&["export", "--now", EXPORT_NOW, "--debtor", "alice"]),
+        ["a", "b"]
+    );
+    assert_eq!(
+        ids(&["export", "--now", EXPORT_NOW, "--creditor", "bob"]),
+        ["a", "c"]
+    );
+    assert_eq!(
+        ids(&[
+            "export",
+            "--now",
+            EXPORT_NOW,
+            "--since",
+            "2026-08-29T00:00:00Z"
+        ]),
+        ["b", "c"]
+    );
+    assert_eq!(
+        ids(&[
+            "export",
+            "--now",
+            EXPORT_NOW,
+            "--state",
+            "detached",
+            "--state",
+            "overdue",
+            "--debtor",
+            "alice",
+            "--creditor",
+            "carol",
+            "--since",
+            "2026-08-29T00:00:00Z"
+        ]),
+        ["b"]
+    );
+    let shifted = scratch.run(&["export", "--now", "2019-01-01T00:00:00Z"]);
+    shifted.expect(0);
+    assert_eq!(shifted.json()["summary"]["states"]["overdue"], 0);
+    assert_eq!(scratch.run(&["export", "--now", "not-a-date"]).code, 2);
+    assert_eq!(scratch.run(&["export", "--since", "not-a-date"]).code, 2);
+}
+
+#[test]
+fn export_sorts_declarations_by_time_then_id_not_ledger_order() {
+    let scratch = Scratch::new();
+    for id in ["c", "b", "a"] {
+        scratch
+            .run(&[
+                "promise", id, "--id", id, "--by", "debtor", "--to", "creditor", "--until", FUTURE,
+            ])
+            .expect(0);
+    }
+    scratch.rewrite(|n, event| {
+        event.insert(
+            "ts".into(),
+            serde_json::json!(
+                [
+                    "2026-08-30T00:00:00Z",
+                    "2026-08-30T00:00:00Z",
+                    "2026-08-29T00:00:00Z",
+                ][n]
+            ),
+        );
+    });
+    let rows = scratch.run(&["export", "--now", EXPORT_NOW]).json()["promises"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let ids: Vec<&str> = rows.iter().map(|row| row["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["a", "b", "c"]);
+}
+
+#[test]
+fn export_refuses_a_malformed_ledger_line_like_ls() {
+    let scratch = Scratch::new();
+    scratch.promise("send it", "alice", "bob", FUTURE);
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(scratch.ledger())
+        .unwrap();
+    writeln!(file, "{{not json").unwrap();
+    let before = scratch.lines();
+    let exported = scratch.run(&["export", "--now", EXPORT_NOW]);
+    let listed = scratch.run(&["ls", "--all", "--json"]);
+    exported.expect(1);
+    listed.expect(1);
+    assert!(exported.stdout.is_empty());
+    assert_eq!(exported.stderr, listed.stderr);
+    assert!(exported.stderr.contains("line 2"));
+    assert_eq!(scratch.lines(), before);
+}
+
 // ------------------------------------------------------------ what stays uncovered
 //
 // `cargo llvm-cov --summary-only --show-missing-lines` names eleven source lines that

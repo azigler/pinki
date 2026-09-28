@@ -18,6 +18,7 @@
 mod a2a;
 mod cli;
 mod event;
+mod export;
 mod id;
 mod ledger;
 mod record;
