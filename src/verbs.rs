@@ -1,4 +1,4 @@
-//! The seven verbs — DESIGN.md §5.
+//! The eight verbs — DESIGN.md §5.
 //!
 //! Every verb is the same three moves: read the ledger, fold it into states at
 //! `now`, and then either print or append exactly one event. Nothing here holds
@@ -36,6 +36,7 @@ use crate::cli::{
     A2aCommand, AmendArgs, AssessArgs, Command, LsArgs, PromiseArgs, ResolveArgs, Scope, ShowArgs,
 };
 use crate::event::{Event, EventBody, Resolution};
+use crate::export;
 use crate::id;
 use crate::ledger;
 use crate::record::{Meta, Promise};
@@ -88,6 +89,7 @@ pub fn run(command: Command) -> Result<(), Fail> {
         Command::Assess(args) => assess(args),
         Command::Ls(args) => ls(args),
         Command::Show(args) => show(args),
+        Command::Export(args) => export::run(args),
         Command::A2a { command } => match command {
             A2aCommand::Card => a2a_card(),
             A2aCommand::Task { id } => a2a_task(&id),

@@ -86,7 +86,7 @@ Three layers, separately adoptable:
    the AgentCard declaration, the `A2A-Extensions` header, and URI-prefixed
    `metadata` keys. No new task states, no new roles.
    → [docs/A2A-EXTENSION.md](docs/A2A-EXTENSION.md)
-3. **A CLI over an append-only JSONL log** — seven verbs, no daemon, no server, no
+3. **A CLI over an append-only JSONL log** — eight verbs, no daemon, no server, no
    database, and **no network calls at all**. It writes JSON to stdout and you pipe
    it into the A2A client you already run.
 
@@ -103,8 +103,8 @@ database.
 cargo build --release
 ```
 
-The binary lands at `target/release/pinki`. Put it on your `PATH` and it will create
-its ledger on first use:
+The binary lands at `target/release/pinki`. Put it on your `PATH`; the first
+`promise` creates its ledger:
 
 ```sh
 ./target/release/pinki promise "hand back a reviewed schema" \
@@ -118,6 +118,32 @@ Copy that file and you have copied the state.
 
 **MSRV: Rust 1.97.1** — the stable toolchain this is built and tested against. Earlier
 versions may work; none are tested, so none are claimed.
+
+## Export
+
+`pinki export` reads the ledger and prints a versioned view for tools that draw the
+promise graph. It reports computed state and carries each assessment with its
+observer; it never decides whether a promise was broken. The default is one JSON
+document:
+
+```sh
+pinki export --now 2026-09-01T17:00:00Z --debtor https://example.org/agents/reviewer
+```
+
+```json
+{"format":"pinki-export","version":1,"summary":{"total":1,"states":{"cancelled":0,"conditional":0,"detached":1,"expired":0,"overdue":0,"released":0,"satisfied":0}},"promises":[{"id":"pnk_4f3a91","promise":"hand back a reviewed schema","by":"https://example.org/agents/reviewer","to":"https://example.org/agents/author","until":"2026-09-02T17:00:00Z","original_until":"2026-09-02T17:00:00Z","amendments":[],"state":"detached","resolution":null,"assessments":[],"created_at":"2026-08-28T20:14:03Z"}]}
+```
+
+`--format jsonl` prints one promise object per line, with no header or summary;
+an empty selection prints nothing. Filter with repeatable `--state`, `--debtor`,
+`--creditor`, and `--since` (inclusive on declaration time). `--now` sets the
+instant used for `overdue`; without it, pinki uses the current time as `ls` and
+`show` do. For byte-identical output across runs, pass `--now`. Promises are ordered
+by declaration time then id, and amendments and assessments by their event time.
+The current `until` still follows ledger order: the last amend wins even if event
+timestamps are out of order. A promise's `meta`, and each event's own `meta`, are
+carried without interpretation. The document leaves out the local ledger path, so
+copying the same ledger does not change its export.
 
 ## Prior art
 

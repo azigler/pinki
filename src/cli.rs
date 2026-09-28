@@ -1,4 +1,4 @@
-//! The argument surface — DESIGN.md §5's seven verbs, and nothing else.
+//! The argument surface — DESIGN.md §5's eight verbs, and nothing else.
 //!
 //! This module only *describes* the command line. Everything it accepts is then
 //! validated by [`crate::verbs`], because several of §5's rules are ours to state in
@@ -8,7 +8,7 @@
 //! without editorializing — mutual exclusion, requiredness of a positional — live
 //! here.
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 /// pinki — a tiny promise broker: an append-only log of obligations between named
 /// agents.
@@ -40,6 +40,8 @@ pub enum Command {
     Ls(LsArgs),
     /// Show one promise: its record, its state, its resolution, and every assessment.
     Show(ShowArgs),
+    /// Emit a versioned, read-only view of promises for visualizers.
+    Export(ExportArgs),
     /// Emit an A2A block to stdout. Calls nothing.
     A2a {
         #[command(subcommand)]
@@ -236,6 +238,39 @@ pub struct ShowArgs {
     /// Emit one JSON object instead of a human-readable block.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ExportFormat {
+    Json,
+    Jsonl,
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// One document (json) or one promise per line (jsonl). Defaults to json.
+    #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
+    pub format: ExportFormat,
+
+    /// Include only these computed states. Repeat to include more than one.
+    #[arg(long, value_name = "STATE", value_parser = ["conditional", "detached", "overdue", "satisfied", "cancelled", "released", "expired"])]
+    pub state: Vec<String>,
+
+    /// Include only promises owed by this identity.
+    #[arg(long, value_name = "URI")]
+    pub debtor: Option<String>,
+
+    /// Include only promises owed to this identity.
+    #[arg(long, value_name = "URI")]
+    pub creditor: Option<String>,
+
+    /// Include promises declared at or after this ISO-8601 instant.
+    #[arg(long, value_name = "ISO")]
+    pub since: Option<String>,
+
+    /// Compute overdue against this ISO-8601 instant. Defaults to the current time.
+    #[arg(long, value_name = "ISO")]
+    pub now: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

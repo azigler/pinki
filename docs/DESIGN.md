@@ -424,7 +424,7 @@ weaker thing to build on.
 
 ## 5. The CLI
 
-Seven verbs. It should feel like a small issue tracker: push JSON in, pull JSON out,
+Eight verbs. It should feel like a small issue tracker: push JSON in, pull JSON out,
 no daemon, no server, no database.
 
 ```
@@ -443,6 +443,8 @@ pinki assess  pnk_88de10 --violated --observer author --note "nothing shipped"
 
 pinki ls    [--open|--overdue|--by X|--to Y|--json]
 pinki show  pnk_4f3a91 [--json]
+pinki export [--format json|jsonl] [--state STATE]... [--debtor URI] [--creditor URI] \
+      [--since ISO] [--now ISO]
 
 pinki a2a card              # emit the AgentCard extension block  -> stdout
 pinki a2a task  pnk_4f3a91  # emit the Task metadata block        -> stdout
@@ -454,6 +456,20 @@ Terminal states (`satisfied`, `cancelled`, `released`, `expired`) are excluded f
 both and shown by `--all`. Both `ls` and `show` print the **current** horizon in
 `until`; `show` additionally lists every horizon the promise has had, declaration
 first, once there is more than one.
+
+`export` is a read-only projection for viewers, not a new source of state. JSON is
+one `{"format":"pinki-export","version":1,"summary":…, "promises":[…]}` document;
+the summary counts the selected promises by each computed state, including zeros.
+JSONL is one promise object per line, with no summary or header. Each object carries
+the current and original `until`, amendments, resolution, assessments, declaration
+time, and the `meta` of every act that supplied it. `--state` is repeatable and ORed;
+the other filters combine with it, and `--since` includes declarations at its instant.
+The fold still decides state and the current horizon by ledger order. Output order is
+declaration time then id, with amendment and assessment arrays ordered by event time.
+`--now` fixes the overdue boundary for reproducible output; without it, the current
+time is used as in `ls` and `show`. The local ledger path is omitted so a copied
+ledger produces the same bytes. An assessment remains an attributed speech act, never
+a computed `violated` state.
 
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
 explicit one that disagrees. `--reason` is encouraged, not required: an escalation
