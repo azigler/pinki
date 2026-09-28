@@ -11,6 +11,13 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
+A read side for the ledger. Until now the only ways to see the promise graph were `ls`
+and `show`, both written for a person at a terminal. `export` writes it for tools: one
+versioned document a visualizer can draw from, carrying what the fold computes and
+leaving every judgment attributed to the observer who made it.
+
 ### Added
 
 - **`pinki export`** — a versioned, read-only JSON view of every promise for
@@ -329,6 +336,7 @@ The nucleus: enough of pinki to actually use, and enough tests to believe it.
   not run while the suite is green. An unexplained gap and a deliberate one look
   identical in a coverage report; these are on the record as deliberate.
 
-[Unreleased]: https://github.com/azigler/pinki/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/azigler/pinki/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/azigler/pinki/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/azigler/pinki/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/azigler/pinki/releases/tag/v0.1.0
