@@ -50,8 +50,8 @@ use crate::state::{fold, PromiseView, State};
 ///   what clap's own parse errors exit with, so a caller sees one code for "you asked
 ///   for something that isn't a command."
 /// - [`Fail::Op`] — the command was well formed and could not be carried out: an id
-///   nothing declares, a promise already resolved, a ledger that will not read. Exit
-///   **1**.
+///   nothing declares, a promise already resolved, a ledger that will not read or that
+///   a read-only verb cannot find. Exit **1**.
 ///
 /// Success is **0**. Errors are printed to stderr by `main`.
 #[derive(Debug)]
@@ -559,7 +559,7 @@ struct Row<'a> {
 }
 
 fn ls(args: LsArgs) -> Result<(), Fail> {
-    let events = read_ledger()?;
+    let events = read_existing_ledger()?;
     let now = now_to_the_second();
     let folded = fold(&events, now);
 
@@ -596,11 +596,12 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
         // Silence would be ambiguous here: an empty ledger and a filter that hid
         // everything look identical on stdout. The note goes to stderr so the table
         // stays exactly as machine-readable as it was, and the exit code stays 0 —
-        // nobody having promised anything is a legitimate state, not an error.
+        // nobody having promised anything is a legitimate state, not an error. The
+        // file exists to get here; a missing one already failed in the read above.
         if folded.is_empty() {
             eprintln!(
                 "pinki: the ledger at {} holds no promises",
-                ledger::path().display()
+                ledger::absolute_path().display()
             );
         } else {
             eprintln!(
@@ -700,7 +701,7 @@ struct AssessmentJson<'a> {
 }
 
 fn show(args: ShowArgs) -> Result<(), Fail> {
-    let events = read_ledger()?;
+    let events = read_existing_ledger()?;
     let now = now_to_the_second();
     let folded = fold(&events, now);
     let view = folded
@@ -880,7 +881,7 @@ fn a2a_card() -> Result<(), Fail> {
 }
 
 fn a2a_task(id: &str) -> Result<(), Fail> {
-    let events = read_ledger()?;
+    let events = read_existing_ledger()?;
     let folded = fold(&events, now_to_the_second());
     let view = folded.get(id).ok_or_else(|| unknown_id(id, "a2a task"))?;
 
@@ -898,9 +899,17 @@ fn a2a_task(id: &str) -> Result<(), Fail> {
 
 // ---------------------------------------------------------------- shared
 
-/// Read the ledger, or fail operationally. A missing file is an empty ledger.
+/// Read the ledger for a verb about to append, or fail operationally. A missing file
+/// is an empty ledger: the append will create it.
 fn read_ledger() -> Result<Vec<Event>, Fail> {
     ledger::read().map_err(|e| Fail::Op(e.to_string()))
+}
+
+/// Read the ledger for a verb that only reads, or fail operationally. A missing file
+/// is a failure, not an empty ledger: a read creates nothing, and "no promises" from a
+/// directory that holds no ledger would be a false "you owe nothing".
+pub(crate) fn read_existing_ledger() -> Result<Vec<Event>, Fail> {
+    ledger::read_existing().map_err(|e| Fail::Op(e.to_string()))
 }
 
 /// Append one event, or fail operationally.

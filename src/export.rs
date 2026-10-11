@@ -13,10 +13,9 @@ use serde::Serialize;
 
 use crate::cli::{ExportArgs, ExportFormat};
 use crate::event::{EventBody, Resolution};
-use crate::ledger;
 use crate::record::{Meta, Promise};
 use crate::state::{fold, PromiseView, State};
-use crate::verbs::Fail;
+use crate::verbs::{read_existing_ledger, Fail};
 
 #[derive(Serialize)]
 struct Document<'a> {
@@ -91,7 +90,7 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
         .as_deref()
         .map(|value| parse_instant(value, "--since"))
         .transpose()?;
-    let events = ledger::read().map_err(|e| Fail::Op(e.to_string()))?;
+    let events = read_existing_ledger()?;
     let folded = fold(&events, now);
 
     let mut selected = Vec::new();

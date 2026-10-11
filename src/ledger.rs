@@ -6,9 +6,13 @@
 //!
 //! Two behaviours are load-bearing:
 //!
-//! - **A missing file is an empty ledger, not an error.** Nobody has promised
-//!   anything yet; that is a legitimate state and the first `promise` will create the
-//!   file.
+//! - **A missing file is an empty ledger to a writer, and an error to a reader.** A
+//!   verb that appends ([`read`], then [`append`]) folds a missing file as zero events,
+//!   because nobody has promised anything yet and the first `promise` will create it.
+//!   A verb that only reads ([`read_existing`]) refuses one instead, naming the
+//!   absolute path it looked at: the default path is relative to the working
+//!   directory, and "no promises" from the wrong directory is a false "you owe
+//!   nothing". An empty file that exists is still an empty ledger to both.
 //! - **A malformed line is loud.** §4 notes that truncating the log is lying to
 //!   yourself — silently skipping a line you could not parse is the same lie told one
 //!   line at a time, and it would make the fold quietly wrong. The error names the
@@ -52,6 +56,18 @@ pub enum Error {
     /// An event could not be turned into JSON. Practically unreachable; kept so the
     /// append path has no `unwrap`.
     Encode { source: serde_json::Error },
+    /// A read-only verb found no file at the ledger path. `path` is absolute.
+    Missing { path: PathBuf, origin: Origin },
+}
+
+/// Where the ledger path came from — the one thing a reader needs to know when the
+/// file is not there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// `PINKI_LEDGER` is unset or empty, so the path is [`DEFAULT_PATH`].
+    Default,
+    /// `PINKI_LEDGER` names the path.
+    Env,
 }
 
 impl fmt::Display for Error {
@@ -66,6 +82,26 @@ impl fmt::Display for Error {
                 path.display()
             ),
             Error::Encode { source } => write!(f, "could not encode event as JSON: {source}"),
+            Error::Missing {
+                path,
+                origin: Origin::Default,
+            } => write!(
+                f,
+                "no ledger at {}: {ENV_VAR} is unset, so pinki looked for the default \
+                 {DEFAULT_PATH} under the working directory. Run from the directory that \
+                 holds .pinki/, or set {ENV_VAR} to the ledger's path. A read never creates \
+                 a ledger; the first `pinki promise` does",
+                path.display()
+            ),
+            Error::Missing {
+                path,
+                origin: Origin::Env,
+            } => write!(
+                f,
+                "no ledger at {}: {ENV_VAR} names a file that does not exist. A read never \
+                 creates a ledger; the first `pinki promise` does",
+                path.display()
+            ),
         }
     }
 }
@@ -75,6 +111,7 @@ impl std::error::Error for Error {
         match self {
             Error::Io { source, .. } => Some(source),
             Error::Malformed { source, .. } | Error::Encode { source } => Some(source),
+            Error::Missing { .. } => None,
         }
     }
 }
@@ -82,6 +119,26 @@ impl std::error::Error for Error {
 /// The ledger path for this process.
 pub fn path() -> PathBuf {
     resolve_path(std::env::var_os(ENV_VAR))
+}
+
+/// The ledger path for this process, made absolute against the working directory —
+/// for messages, where a relative path says nothing about which directory it meant.
+pub fn absolute_path() -> PathBuf {
+    absolute(&path())
+}
+
+/// `path`, absolute. Lexical only: nothing is resolved, and the file need not exist.
+/// Falls back to `path` as given if the working directory cannot be read.
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Which rule chose the path: [`ENV_VAR`], or the default it falls back to.
+fn origin_of(from_env: Option<&OsString>) -> Origin {
+    match from_env {
+        Some(value) if !value.is_empty() => Origin::Env,
+        _ => Origin::Default,
+    }
 }
 
 /// The path rule, pulled out of the environment so it can be tested without mutating
@@ -93,17 +150,40 @@ fn resolve_path(from_env: Option<OsString>) -> PathBuf {
     }
 }
 
-/// Read the whole ledger from the configured path.
+/// Read the whole ledger from the configured path, for a verb about to append. A
+/// missing file is zero events.
 pub fn read() -> Result<Vec<Event>, Error> {
     read_at(&path())
 }
 
-/// Read the whole ledger from an explicit path.
+/// Read the whole ledger from an explicit path. A missing file is zero events.
 pub fn read_at(path: &Path) -> Result<Vec<Event>, Error> {
+    // No file means nobody has promised anything yet.
+    Ok(read_if_present(path)?.unwrap_or_default())
+}
+
+/// Read the whole ledger from the configured path, for a verb that only reads. A
+/// missing file is [`Error::Missing`], never zero events.
+pub fn read_existing() -> Result<Vec<Event>, Error> {
+    let from_env = std::env::var_os(ENV_VAR);
+    let origin = origin_of(from_env.as_ref());
+    read_existing_at(&resolve_path(from_env), origin)
+}
+
+/// Read the whole ledger from an explicit path, refusing a missing file. `origin` is
+/// only for the message.
+pub fn read_existing_at(path: &Path, origin: Origin) -> Result<Vec<Event>, Error> {
+    read_if_present(path)?.ok_or_else(|| Error::Missing {
+        path: absolute(path),
+        origin,
+    })
+}
+
+/// Every event in the file at `path`, or `None` when there is no file.
+fn read_if_present(path: &Path) -> Result<Option<Vec<Event>>, Error> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        // No file means nobody has promised anything yet.
-        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(Error::Io {
                 path: path.to_path_buf(),
@@ -142,7 +222,7 @@ pub fn read_at(path: &Path) -> Result<Vec<Event>, Error> {
             }
         }
     }
-    Ok(events)
+    Ok(Some(events))
 }
 
 /// Append one event to the configured ledger, creating it (and its directory) if this
@@ -250,6 +330,53 @@ mod tests {
         let scratch = Scratch::new("missing");
         let events = read_at(&scratch.join("nope/ledger.jsonl")).unwrap();
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_reader_refuses_a_missing_file_and_names_it() {
+        let scratch = Scratch::new("readmissing");
+        let path = scratch.join("nope/ledger.jsonl");
+
+        let err = read_existing_at(&path, Origin::Env).unwrap_err();
+        assert!(
+            matches!(&err, Error::Missing { path: named, origin: Origin::Env } if named == &path),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("names a file that does not exist"), "{msg}");
+        assert!(!path.exists(), "a read never creates the ledger");
+    }
+
+    #[test]
+    fn a_missing_default_ledger_is_named_absolutely_and_says_the_env_is_unset() {
+        let err = read_existing_at(Path::new(DEFAULT_PATH), Origin::Default).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Error::Missing { path, origin: Origin::Default }
+                    if path.is_absolute() && path.ends_with(".pinki/ledger.jsonl")
+            ),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("PINKI_LEDGER is unset"), "{msg}");
+        assert!(!msg.contains("./.pinki/ledger.jsonl:"), "{msg}");
+    }
+
+    #[test]
+    fn a_reader_reads_an_empty_file_as_an_empty_ledger() {
+        let scratch = Scratch::new("readempty");
+        let path = scratch.join("ledger.jsonl");
+        fs::write(&path, "").unwrap();
+        assert!(read_existing_at(&path, Origin::Env).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_source_is_the_env_only_when_it_says_something() {
+        assert_eq!(origin_of(None), Origin::Default);
+        assert_eq!(origin_of(Some(&OsString::from(""))), Origin::Default);
+        assert_eq!(origin_of(Some(&OsString::from("x.jsonl"))), Origin::Env);
     }
 
     #[test]
@@ -407,6 +534,15 @@ mod tests {
         assert!(
             encode.source().is_some(),
             "an Encode error keeps the serde failure"
+        );
+
+        let missing = Error::Missing {
+            path: PathBuf::from("/tmp/ledger.jsonl"),
+            origin: Origin::Default,
+        };
+        assert!(
+            missing.source().is_none(),
+            "a Missing error wraps nothing: the absence is the whole fact"
         );
     }
 

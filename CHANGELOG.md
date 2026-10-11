@@ -11,6 +11,24 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A read from the wrong directory no longer says you owe nothing**
+  ([#15](https://github.com/azigler/pinki/issues/15)). With `PINKI_LEDGER` unset the
+  ledger is `./.pinki/ledger.jsonl`, relative to the working directory, and a missing
+  file was read as an empty ledger — so `pinki ls` run from anywhere else printed
+  `the ledger at ./.pinki/ledger.jsonl holds no promises` and exited 0. The verbs that
+  only read — `ls`, `show`, `export` and `a2a task` — now exit 1 when the ledger file
+  does not exist, print nothing on stdout (`ls --json` no longer prints `[]` for it),
+  and name the absolute path they looked at and why: `PINKI_LEDGER` is unset and the
+  default was used, or `PINKI_LEDGER` names a file that does not exist. A read never
+  creates the file. The writing verbs are unchanged: the first `promise` still creates
+  the ledger, and `amend`, `resolve` and `assess` still read a missing file as empty
+  before they refuse an undeclared id.
+- **The empty-ledger note names the ledger absolutely**: `the ledger at
+  /abs/path/.pinki/ledger.jsonl holds no promises`. A ledger file that exists and holds
+  nothing is still an empty ledger to every verb, exit 0, exactly as before.
+
 ## [0.3.0] - 2026-09-28
 
 A read side for the ledger. Until now the only ways to see the promise graph were `ls`

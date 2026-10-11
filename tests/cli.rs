@@ -17,7 +17,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -60,25 +60,54 @@ impl Scratch {
         }
     }
 
+    /// The scratch directory as the child sees it from `getcwd`. Canonical, because a
+    /// temp directory reached through a symlink is reported by its real path.
+    fn cwd(&self) -> PathBuf {
+        fs::canonicalize(&self.dir).expect("canonical scratch dir")
+    }
+
+    /// Where `./.pinki/ledger.jsonl` resolves for a child run in the scratch directory.
+    fn cwd_ledger(&self) -> PathBuf {
+        self.cwd().join(".pinki").join("ledger.jsonl")
+    }
+
+    /// Create the ledger as an empty file: a ledger that exists and holds nothing,
+    /// which a reader treats differently from one that is not there at all.
+    fn touch(&self) {
+        fs::create_dir_all(self.dir.join(".pinki")).expect("the ledger's directory");
+        fs::write(self.ledger(), "").expect("an empty ledger");
+    }
+
     fn run(&self, args: &[&str]) -> Run {
-        self.spawn(args, None, self.ledger().into_os_string())
+        self.spawn(args, None, Some(self.ledger().into_os_string()))
     }
 
     fn feed(&self, args: &[&str], stdin: &str) -> Run {
-        self.spawn(args, Some(stdin), self.ledger().into_os_string())
+        self.spawn(args, Some(stdin), Some(self.ledger().into_os_string()))
     }
 
     /// Run with `PINKI_LEDGER` set to a bare filename. The child already runs in the
     /// scratch directory, so the ledger lands there — and there is no parent directory
     /// for pinki to create.
     fn run_with_bare_ledger(&self, name: &str, args: &[&str]) -> Run {
-        self.spawn(args, None, OsString::from(name))
+        self.spawn(args, None, Some(OsString::from(name)))
     }
 
-    fn spawn(&self, args: &[&str], stdin: Option<&str>, ledger: OsString) -> Run {
-        let mut child = Command::new(BIN)
+    /// Run with `PINKI_LEDGER` removed from the child's environment, so pinki falls
+    /// back to `./.pinki/ledger.jsonl` — which, from the scratch directory, is
+    /// [`Scratch::ledger`].
+    fn run_with_ledger_unset(&self, args: &[&str]) -> Run {
+        self.spawn(args, None, None)
+    }
+
+    fn spawn(&self, args: &[&str], stdin: Option<&str>, ledger: Option<OsString>) -> Run {
+        let mut command = Command::new(BIN);
+        match &ledger {
+            Some(ledger) => command.env("PINKI_LEDGER", ledger),
+            None => command.env_remove("PINKI_LEDGER"),
+        };
+        let mut child = command
             .args(args)
-            .env("PINKI_LEDGER", &ledger)
             .current_dir(&self.dir)
             .stdin(if stdin.is_some() {
                 Stdio::piped()
@@ -1446,6 +1475,7 @@ fn assessing_an_unknown_id_fails_operationally() {
 #[test]
 fn ls_on_an_empty_ledger_is_an_empty_array() {
     let scratch = Scratch::new();
+    scratch.touch();
     let run = scratch.run(&["ls", "--json"]);
     run.expect(0);
     assert_eq!(run.stdout.trim(), "[]");
@@ -1577,6 +1607,7 @@ fn ls_human_output_is_plain_ascii_columns() {
 #[test]
 fn ls_on_an_empty_ledger_says_so_on_stderr() {
     let scratch = Scratch::new();
+    scratch.touch();
 
     let run = scratch.run(&["ls"]);
     // Nobody having promised anything is a legitimate state, not an error — but
@@ -1588,6 +1619,21 @@ fn ls_on_an_empty_ledger_says_so_on_stderr() {
         "the note should say the ledger is empty: {:?}",
         run.stderr
     );
+
+    // With the default path, the note names the file absolutely: `./.pinki/…` says
+    // nothing about which directory held the empty ledger.
+    let unset = scratch.run_with_ledger_unset(&["ls"]);
+    unset.expect(0);
+    let named = format!(
+        "the ledger at {} holds no promises",
+        scratch.cwd_ledger().display()
+    );
+    assert!(
+        unset.stderr.contains(&named),
+        "the note should name the ledger absolutely: {:?}",
+        unset.stderr
+    );
+    assert!(!unset.stderr.contains("./.pinki"), "{:?}", unset.stderr);
 }
 
 #[test]
@@ -1951,12 +1997,18 @@ fn show_lists_an_assessment_that_carries_no_note() {
 #[test]
 fn showing_an_unknown_id_fails_operationally() {
     let scratch = Scratch::new();
-    scratch.run(&["show", "pnk_000000"]).expect(1);
+    scratch.touch();
+    let run = scratch.run(&["show", "pnk_000000"]);
+    run.expect(1);
+    // An empty ledger that exists is a lookup miss, not a missing ledger.
+    assert!(run.stderr.contains("nothing in"), "{:?}", run.stderr);
+    assert!(!run.stderr.contains("no ledger at"), "{:?}", run.stderr);
 }
 
 #[test]
 fn showing_an_id_that_could_never_have_been_declared_says_so() {
     let scratch = Scratch::new();
+    scratch.touch();
     // `pnk_` is reserved, and this is not a minted id, so no route could have put it
     // in the ledger. That is a typo, not a lookup miss, and the hint says which.
     let run = scratch.run(&["show", "pnk_bogus"]);
@@ -1972,6 +2024,7 @@ fn showing_an_id_that_could_never_have_been_declared_says_so() {
 #[test]
 fn showing_an_unknown_foreign_id_is_a_plain_lookup_miss() {
     let scratch = Scratch::new();
+    scratch.touch();
     // Since §1 admits a caller's own id, "this does not look like a pinki id" is no
     // longer evidence of anything — `bogus` is a perfectly declarable id, so the only
     // true thing to say is that nothing declares it.
@@ -2034,6 +2087,157 @@ fn a_bare_ledger_filename_lands_beside_the_working_directory() {
     assert!(
         !scratch.dir.join(".pinki").exists(),
         "no directory should have been created"
+    );
+}
+
+// ------------------------------------------------------ a ledger that is not there
+//
+// Issue #15. The default path is relative to the working directory, so a read from
+// the wrong directory used to fold zero events and say "no promises" with exit 0 — a
+// false "you owe nothing". A verb that only reads now refuses a missing file, exit 1,
+// naming the absolute path it looked at and which rule chose it. A verb that writes
+// still reads a missing file as empty, because it is about to create it.
+
+/// Assert `run` is the missing-ledger refusal for `path`, chosen by the rule
+/// `because` names, and that nothing reached stdout.
+fn assert_missing_ledger(run: &Run, path: &Path, because: &str) {
+    run.expect(1);
+    assert!(path.is_absolute(), "the test must expect an absolute path");
+    assert!(
+        run.stdout.is_empty(),
+        "a missing ledger prints nothing on stdout, not an empty result: {:?}",
+        run.stdout
+    );
+    assert!(
+        run.stderr
+            .contains(&format!("no ledger at {}", path.display())),
+        "the error should name {} absolutely: {:?}",
+        path.display(),
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(because),
+        "the error should say {because:?}: {:?}",
+        run.stderr
+    );
+}
+
+/// Every way a read can be pointed at a missing ledger, for one read verb: the
+/// default path with `PINKI_LEDGER` unset, an absolute `PINKI_LEDGER`, and a
+/// relative one. None of them may create the file.
+fn assert_read_refuses_every_missing_ledger(args: &[&str]) {
+    let scratch = Scratch::new();
+
+    let unset = scratch.run_with_ledger_unset(args);
+    assert_missing_ledger(&unset, &scratch.cwd_ledger(), "PINKI_LEDGER is unset");
+
+    let set = scratch.run(args);
+    assert_missing_ledger(
+        &set,
+        &scratch.ledger(),
+        "PINKI_LEDGER names a file that does not exist",
+    );
+
+    let relative = scratch.run_with_bare_ledger("elsewhere.jsonl", args);
+    assert_missing_ledger(
+        &relative,
+        &scratch.cwd().join("elsewhere.jsonl"),
+        "PINKI_LEDGER names a file that does not exist",
+    );
+
+    assert!(
+        !scratch.ledger().exists(),
+        "a read must not create a ledger"
+    );
+    assert!(
+        !scratch.dir.join(".pinki").exists(),
+        "a read must not create the ledger's directory"
+    );
+    assert!(!scratch.dir.join("elsewhere.jsonl").exists());
+}
+
+#[test]
+fn ls_on_a_missing_ledger_fails_and_names_the_absolute_path() {
+    assert_read_refuses_every_missing_ledger(&["ls"]);
+    assert_read_refuses_every_missing_ledger(&["ls", "--all"]);
+}
+
+#[test]
+fn ls_json_on_a_missing_ledger_fails_rather_than_printing_an_empty_array() {
+    assert_read_refuses_every_missing_ledger(&["ls", "--json"]);
+}
+
+#[test]
+fn show_on_a_missing_ledger_fails_and_names_the_absolute_path() {
+    assert_read_refuses_every_missing_ledger(&["show", "pnk_000000"]);
+    assert_read_refuses_every_missing_ledger(&["show", "pnk_000000", "--json"]);
+}
+
+#[test]
+fn export_on_a_missing_ledger_fails_and_names_the_absolute_path() {
+    assert_read_refuses_every_missing_ledger(&["export", "--now", EXPORT_NOW]);
+    assert_read_refuses_every_missing_ledger(&["export", "--format", "jsonl"]);
+}
+
+#[test]
+fn a2a_task_on_a_missing_ledger_fails_and_names_the_absolute_path() {
+    assert_read_refuses_every_missing_ledger(&["a2a", "task", "pnk_000000"]);
+}
+
+#[test]
+fn a2a_card_reads_no_ledger_so_a_missing_one_is_not_its_business() {
+    let scratch = Scratch::new();
+    scratch.run_with_ledger_unset(&["a2a", "card"]).expect(0);
+    assert!(!scratch.ledger().exists());
+}
+
+#[test]
+fn promise_with_the_ledger_unset_creates_the_default_file_under_the_working_directory() {
+    let scratch = Scratch::new();
+    assert!(!scratch.ledger().exists(), "ledger must not pre-exist");
+
+    let run = scratch.run_with_ledger_unset(&[
+        "promise",
+        "ship it",
+        "--by",
+        "author",
+        "--to",
+        "publisher",
+        "--until",
+        FUTURE,
+    ]);
+    run.expect(0);
+    let id = run.id();
+    assert_eq!(
+        scratch.lines().len(),
+        1,
+        "the first promise creates the file"
+    );
+
+    // And the read that was refused a moment ago now finds it.
+    let listed = scratch.run_with_ledger_unset(&["ls", "--json"]);
+    listed.expect(0);
+    assert_eq!(listed.json()[0]["id"], id.as_str());
+}
+
+#[test]
+fn the_other_writing_verbs_still_read_a_missing_ledger_as_empty() {
+    let scratch = Scratch::new();
+    // Each needs the prior events to fold, finds none, and says the id is undeclared —
+    // the lookup miss it always was, not the read verbs' missing-ledger refusal.
+    for args in [
+        &["amend", "pnk_000000", "--until", FUTURE][..],
+        &["resolve", "pnk_000000", "--satisfied", "--evidence", "x"][..],
+        &["assess", "pnk_000000", "--violated", "--observer", "author"][..],
+    ] {
+        let run = scratch.run_with_ledger_unset(args);
+        run.expect(1);
+        assert!(run.stderr.contains("nothing in"), "{:?}", run.stderr);
+        assert!(!run.stderr.contains("no ledger at"), "{:?}", run.stderr);
+    }
+    assert!(
+        !scratch.ledger().exists(),
+        "a refused write appends nothing"
     );
 }
 
@@ -2154,9 +2358,13 @@ fn a2a_task_emits_the_metadata_block_for_one_promise() {
 #[test]
 fn a2a_task_for_an_unknown_id_fails_operationally() {
     let scratch = Scratch::new();
+    scratch.touch();
     let run = scratch.run(&["a2a", "task", "pnk_000000"]);
     run.expect(1);
     assert!(run.stdout.is_empty(), "no half-written JSON on failure");
+    // An empty ledger that exists is a lookup miss, not a missing ledger.
+    assert!(run.stderr.contains("nothing in"), "{:?}", run.stderr);
+    assert!(!run.stderr.contains("no ledger at"), "{:?}", run.stderr);
 }
 
 // -------------------------------------------------------------------- meta
@@ -2789,8 +2997,9 @@ fn the_fold_ignores_meta_on_every_event() {
 const EXPORT_NOW: &str = "2026-09-01T12:00:00Z";
 
 #[test]
-fn export_empty_ledger_is_a_versioned_document_and_does_not_create_a_file() {
+fn export_empty_ledger_is_a_versioned_document_and_leaves_the_file_alone() {
     let scratch = Scratch::new();
+    scratch.touch();
     let run = scratch.run(&["export", "--now", EXPORT_NOW]);
     run.expect(0);
     let document = run.json();
@@ -2807,9 +3016,10 @@ fn export_empty_ledger_is_a_versioned_document_and_does_not_create_a_file() {
         scratch.run(&["export", "--now", EXPORT_NOW]).stdout
     );
     assert_eq!(scratch.run(&["export", "--format", "jsonl"]).stdout, "");
-    assert!(
-        !scratch.ledger().exists(),
-        "export must not create a ledger"
+    assert_eq!(
+        fs::read_to_string(scratch.ledger()).expect("the ledger is still there"),
+        "",
+        "export must not write to the ledger"
     );
 }
 
@@ -3137,12 +3347,12 @@ fn export_refuses_a_malformed_ledger_line_like_ls() {
 //   src/state.rs 396   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
-//   src/verbs.rs 768   `_ => None` over `view.assessments`, which `fold` fills only
+//   src/verbs.rs 771   `_ => None` over `view.assessments`, which `fold` fills only
 //                      from `EventBody::Assess` events.
 //
 // Unreachable from a test harness:
 //
-//   src/verbs.rs 267   the `io::stdin().is_terminal()` refusal. A child spawned by a
+//   src/verbs.rs 269   the `io::stdin().is_terminal()` refusal. A child spawned by a
 //                      test never has a tty on stdin, and giving it one would mean a
 //                      pty dependency — which Cargo.toml exists to refuse. Exercised
 //                      by hand: `pinki promise` at a prompt.
@@ -3152,7 +3362,7 @@ fn export_refuses_a_malformed_ledger_line_like_ls() {
 //
 //   src/event.rs 528      `panic!` in `every_event_type_round_trips`.
 //   src/event.rs 720      `panic!` in `meta_survives_a_round_trip_on_every_event_type`.
-//   src/ledger.rs 301,314 `other => panic!("expected Malformed, …")`.
+//   src/ledger.rs 428,441 `other => panic!("expected Malformed, …")`.
 //
 // One more thing a reader should not have to rediscover: the summary's "Missed Lines"
 // column is larger than this list (36 against 11). The difference is not a set of
