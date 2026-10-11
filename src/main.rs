@@ -9,7 +9,7 @@
 //! | Code | Meaning |
 //! |---|---|
 //! | `0` | Success. |
-//! | `1` | Operational failure: an id nothing declares, a promise already resolved, a ledger that will not read or write. |
+//! | `1` | Operational failure: an id nothing declares, a promise already resolved, a ledger that will not read or write, or a read-only verb (`ls`, `show`, `export`, `a2a task`) with no ledger file to read. |
 //! | `2` | Malformed input or a usage error — including clap's own parse errors, which already exit 2. |
 //!
 //! Errors are written to **stderr**, never stdout, so `--json` and the two `a2a`
