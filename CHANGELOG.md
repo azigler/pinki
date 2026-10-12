@@ -11,6 +11,14 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-11
+
+A missing ledger is no longer an empty one. This is a minor release, not a patch, because a
+caller can see the change: `ls`, `show`, `export` and `a2a task` now exit 1 on a ledger file
+that does not exist, where they exited 0 with empty output. A tool that reads a ledger before
+its first write, and counted on `[]`, has to handle that exit. Ledgers are unchanged: v0.3.0
+and v0.4.0 read the same files.
+
 ### Fixed
 
 - **A read from the wrong directory no longer says you owe nothing**
@@ -354,7 +362,8 @@ The nucleus: enough of pinki to actually use, and enough tests to believe it.
   not run while the suite is green. An unexplained gap and a deliberate one look
   identical in a coverage report; these are on the record as deliberate.
 
-[Unreleased]: https://github.com/azigler/pinki/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/azigler/pinki/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/azigler/pinki/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/azigler/pinki/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/azigler/pinki/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/azigler/pinki/releases/tag/v0.1.0
