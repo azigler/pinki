@@ -30,6 +30,7 @@ ln -s "$binary" "$scratch/bin/pinki"
   printf 'set -euo pipefail\n'
   printf "trap 'status=\$?; printf \"README sh block %%s failed (exit %%s)\\n\" \"\$readme_block\" \"\$status\" >&2' ERR\n"
   awk '
+    /^```(bash|shell|zsh|console)[[:space:]]*$/ { print "README: line " NR " uses a non-sh shell fence; it will not run" > "/dev/stderr" }
     /^```sh[[:space:]]*$/ { in_block = 1; block++; print "readme_block=" block; next }
     in_block && /^```[[:space:]]*$/ {
       print "printf \047README sh block " block " passed\\n\047"

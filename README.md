@@ -7,12 +7,18 @@ Use it when agents need to carry obligations across tasks, sessions, or organiza
 
 ## Install
 
-Build v0.4.0 with `cargo build --release --locked`; put `target/release/pinki`
-on `PATH`. Start with `export PINKI_LEDGER="$PWD/ledger.jsonl"`.
+```text
+cargo install --git https://github.com/azigler/pinki --tag v0.4.0 --locked
+```
+
+Or take the prebuilt Linux x86_64 binary from the v0.4.0 release:
+https://github.com/azigler/pinki/releases/tag/v0.4.0. Check with `pinki --version`.
 
 ## Start a ledger and declare a promise
 
-Run these examples in order in an empty directory. Set an explicit ledger path first.
+Run these examples in order, in ONE shell session, in an empty directory. The later
+blocks reuse `PINKI_LEDGER` and `$id` from this one. An agent tool that starts a fresh
+shell per call must re-export `PINKI_LEDGER` and pass the id literally.
 The first `promise` creates the file. It prints an id, a tab, and the computed state.
 
 ```sh
@@ -27,12 +33,14 @@ printf '%s\n' "$receipt"
 ```
 
 `by` owes the work; `to` is owed it. `--task` links an A2A Task.
-Use `--id` for an existing id; otherwise pinki mints `pnk_` plus six hex digits.
+`--on ID` makes it wait on another promise (state `conditional`). `--id ID` brings
+your own id (not `pnk_`, not one already declared); otherwise pinki mints `pnk_` plus
+six hex digits.
 
 ## Check, change, and finish it
 
 `ls` shows open promises by default. Add `--overdue` for the overdue subset,
-`--all` for resolved promises, or `--json` for a machine-readable array.
+`--all` to include resolved promises, or `--json` for a machine-readable array.
 
 ```sh
 pinki ls --json
@@ -59,7 +67,7 @@ pinki ls --all
 ```
 
 `pinki assess ID --violated --observer WHO` publishes an attributed judgment
-without resolving the promise. `pinki export --now ISO` gives a versioned JSON view;
+without resolving the promise. `pinki export` gives a versioned JSON view (`--now ISO` makes it reproducible);
 `--format jsonl` prints one promise per line.
 
 ## States and exit codes
@@ -83,7 +91,7 @@ without resolving the promise. `pinki export --now ISO` gives a versioned JSON v
 | `2` | Malformed input or CLI usage. |
 
 Errors go to stderr. `ls`, `show`, `export`, and `a2a task` exit 1 if the
-ledger file is missing; an existing empty file is different.
+ledger file is missing; an existing empty file reads as empty (exit 0).
 
 ## Teach another agent
 
@@ -95,7 +103,10 @@ To declare work you owe, run pinki promise "WHAT" --by YOUR_AGENT_CARD_URI
 --to PEER_AGENT_CARD_URI --until ISO_8601_INSTANT. Keep the first tab-separated
 field of stdout as its id. Check with pinki ls --json and pinki show ID --json.
 When done, run pinki resolve ID --satisfied --evidence INSPECTABLE_REF.
-If you cannot deliver, run pinki resolve ID --cancelled --reason TEXT. Check the ledger path on read exit 1.
+To move your deadline, run pinki amend ID --until ISO_8601_INSTANT --reason TEXT.
+If you cannot deliver, run pinki resolve ID --cancelled --reason TEXT.
+Exit 1 means a missing ledger, an unknown id, or an already-resolved promise
+(stderr says which). Exit 2 means a malformed command.
 ```
 
 For A2A, advertise the card extension and merge the block into Task `metadata`.
@@ -127,4 +138,4 @@ Read [DESIGN.md](docs/DESIGN.md), [A2A-EXTENSION.md](docs/A2A-EXTENSION.md),
 
 MIT — see [LICENSE](LICENSE).
 
-*pinki builds on [A2A](https://a2a-protocol.org), an [AAIF](https://aaif.io)-hosted project. pinki is not affiliated with or endorsed by either.*
+*pinki builds on [A2A](https://a2a-protocol.org), an [AAIF](https://aaif.io)-hosted project. pinki is not affiliated with, endorsed by, or speaking for either.*
