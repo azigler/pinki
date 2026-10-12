@@ -34,8 +34,8 @@ printf '%s\n' "$receipt"
 
 `by` owes the work; `to` is owed it. `--task` links an A2A Task.
 `--on ID` makes it wait on another promise (state `conditional`). `--id ID` brings
-your own id (not `pnk_`, not one already declared); otherwise pinki mints `pnk_` plus
-six hex digits.
+your own id (avoid the reserved `pnk_` prefix; not one already declared).
+Otherwise pinki mints `pnk_` plus six hex digits.
 
 ## Check, change, and finish it
 
