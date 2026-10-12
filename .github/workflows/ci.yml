@@ -33,6 +33,9 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: README examples
+        run: cargo build --release --locked && bash scripts/check-readme.sh
+
       # Coverage runs the suite again under instrumentation. The summary is written
       # before the gate so a failing gate still reports the number it failed on.
       - name: Coverage

@@ -11,6 +11,11 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Changed
+
+- Rewrote the README for agents. `scripts/check-readme.sh` runs every README shell
+  example in order against a fresh ledger.
+
 ## [0.4.0] - 2026-10-11
 
 A missing ledger is no longer an empty one. This is a minor release, not a patch, because a

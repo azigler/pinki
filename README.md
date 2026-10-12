@@ -1,203 +1,141 @@
 # pinki 🤙
 
-> A tiny promise ledger for agent fleets, shipped as an [A2A](https://a2a-protocol.org)
-> extension.
-
 [![CI](https://github.com/azigler/pinki/actions/workflows/ci.yml/badge.svg)](https://github.com/azigler/pinki/actions/workflows/ci.yml)
 
-**Status: v0.1.0, pre-alpha. The design is public and the CLI runs; nothing is
-stable.** This repo is being built in the open as part of a written deep-dive on agent
-obligations. Minor versions carry the work as it lands, and 1.0 is reserved for done —
-see [CHANGELOG.md](CHANGELOG.md). The most useful thing you can send today is still an
-argument: see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## The problem
-
-Give agents durable identities and they start depending on each other. One waits on
-another's output; a third can't start until the second finishes. Once that happens,
-things get dropped in the gaps between sessions — and nothing in the stack records
-that anything *was* owed.
-
-A2A gives agents identity and a way to talk. It has no way to say **"I will, by
-when, and here's what will prove it."** There is no deadline field anywhere in the
-protocol; `TaskStatus.timestamp` records when a status happened, never when anything
-is due. That gap is [issue #857](https://github.com/a2aproject/A2A/issues/857), open
-since July 2025 — where a project contributor suggested an extension as the right
-vehicle, which is the route this repo takes.
-
-pinki fills it with one record.
-
-```json
-{
-  "id":      "pnk_4f3a91",
-  "promise": "hand back a reviewed schema",
-  "by":      "https://example.org/agents/reviewer",
-  "to":      "https://example.org/agents/author",
-  "on":      "pnk_0c2b77",
-  "until":   "2026-09-01T17:00:00Z"
-}
-```
-
-A **debtor** owes a **creditor** a thing, by a **deadline**. Satisfying it requires
-evidence. Abandoning it requires a reason. And `on` points at another promise, which
-is the interesting part:
-
-> **A task graph's edges are ordering. A promise graph's edges are obligation between
-> named parties.**
-
-A task DAG tells you what has to happen before what. A promise graph tells you who
-owes what to whom — and therefore who is left holding something when a node goes
-quiet. The shape of a project versus the shape of a collaboration.
-
-## What pinki will not do
-
-It will not tell you a promise was broken.
-
-It can't. Whether a promise was kept is a judgment — it depends on what counts as
-done, on context the record doesn't carry, and on who's asking. Mark Burgess's
-[Promise Theory](http://markburgess.org/PromiseMethod.pdf) is blunt about this:
-assessment is made by an agent, from that agent's vantage, and is subjective no
-matter which agent makes it. A third party that appoints itself judge has mostly
-acquired the ability to distort the thing it claims to certify.
-
-So pinki draws a hard line down the middle of its own state machine:
-
-- **`overdue` is arithmetic.** `now > until` and unresolved. Every implementation
-  computes the same answer. pinki will tell you this.
-- **`violated` is a speech act.** Somebody says it, signs it, and timestamps it.
-  pinki will *publish* it, attributed, next to the promise — and never compute it.
-
-Two observers can publish contradicting assessments of the same promise. pinki shows
-you both, because that is the actual state of the world and hiding it would be a lie.
-
-It is also not a scheduler, an agent registry, an SLO engine, a dashboard, or an
-escrow. Each of those has a reason attached in
-[DESIGN.md § 6](docs/DESIGN.md#6-what-pinki-is-not).
-
-## Shape
-
-Three layers, separately adoptable:
-
-1. **A vocabulary** — the record above, and a state machine borrowed from 25 years of
-   [commitment](docs/DESIGN.md#3-the-states) research rather than invented fresh:
-   seven states pinki *computes* (`conditional`, `detached`, `overdue`, `satisfied`,
-   `cancelled`, `released`, `expired`) and one it only ever *publishes* (`violated`).
-2. **An A2A binding** — using only the three surfaces A2A sanctions for extensions:
-   the AgentCard declaration, the `A2A-Extensions` header, and URI-prefixed
-   `metadata` keys. No new task states, no new roles.
-   → [docs/A2A-EXTENSION.md](docs/A2A-EXTENSION.md)
-3. **A CLI over an append-only JSONL log** — eight verbs, no daemon, no server, no
-   database, and **no network calls at all**. It writes JSON to stdout and you pipe
-   it into the A2A client you already run.
-
-You can take the first layer and build your own tooling. You can take the first two
-and interoperate over A2A without ever running pinki. That's the point — pinki is
-meant to be a nucleus you build on top of, not a framework you adopt.
+pinki is a promise ledger: who owes what to whom, by when, with evidence when it is done.
+Use it when agents need to carry obligations across tasks, sessions, or organizations.
 
 ## Install
 
-Build it from source. There is nothing else to install — no daemon, no server, no
-database.
-
-```sh
-cargo build --release
+```text
+cargo install --git https://github.com/azigler/pinki --tag v0.4.0 --locked
 ```
 
-The binary lands at `target/release/pinki`. Put it on your `PATH`; the first
-`promise` creates its ledger:
+Or take the prebuilt Linux x86_64 binary from the v0.4.0 release:
+https://github.com/azigler/pinki/releases/tag/v0.4.0. Check with `pinki --version`.
+
+## Start a ledger and declare a promise
+
+Run these examples in order, in ONE shell session, in an empty directory. The later
+blocks reuse `PINKI_LEDGER` and `$id` from this one. An agent tool that starts a fresh
+shell per call must re-export `PINKI_LEDGER` and pass the id literally.
+The first `promise` creates the file. It prints an id, a tab, and the computed state.
 
 ```sh
-./target/release/pinki promise "hand back a reviewed schema" \
-  --by  https://example.org/agents/reviewer \
-  --to  https://example.org/agents/author \
-  --until 2026-09-01T17:00:00Z
+export PINKI_LEDGER="$PWD/ledger.jsonl"
+receipt=$(pinki promise "Review the schema" \
+  --by https://example.org/agents/reviewer \
+  --to https://example.org/agents/author \
+  --until 2030-01-01T00:00:00Z \
+  --task a2a-task-91)
+id=${receipt%%$'\t'*}
+printf '%s\n' "$receipt"
 ```
 
-The ledger is a JSONL file at `$PINKI_LEDGER`, defaulting to `./.pinki/ledger.jsonl`.
-Copy that file and you have copied the state.
+`by` owes the work; `to` is owed it. `--task` links an A2A Task.
+`--on ID` makes it wait on another promise (state `conditional`). `--id ID` brings
+your own id (avoid the reserved `pnk_` prefix; not one already declared).
+Otherwise pinki mints `pnk_` plus six hex digits.
 
-**MSRV: Rust 1.97.1** — the stable toolchain this is built and tested against. Earlier
-versions may work; none are tested, so none are claimed.
+## Check, change, and finish it
 
-## Export
-
-`pinki export` reads the ledger and prints a versioned view for tools that draw the
-promise graph. It reports computed state and carries each assessment with its
-observer; it never decides whether a promise was broken. The default is one JSON
-document:
+`ls` shows open promises by default. Add `--overdue` for the overdue subset,
+`--all` to include resolved promises, or `--json` for a machine-readable array.
 
 ```sh
-pinki export --now 2026-09-01T17:00:00Z --debtor https://example.org/agents/reviewer
+pinki ls --json
 ```
+
+`show` gives one promise, its current deadline, resolution, and assessments.
+
+```sh
+pinki show "$id" --json
+```
+
+The debtor can move the deadline. pinki keeps each earlier deadline in the ledger.
+
+```sh
+pinki amend "$id" --until 2030-01-02T00:00:00Z --reason "Review needs another day"
+```
+
+Resolve with a reference that the other agent can inspect. Other outcomes are
+`--cancelled --reason TEXT` and `--released` (by the creditor).
+
+```sh
+pinki resolve "$id" --satisfied --evidence https://example.org/reviews/schema-91
+pinki ls --all
+```
+
+`pinki assess ID --violated --observer WHO` publishes an attributed judgment
+without resolving the promise. `pinki export` gives a versioned JSON view (`--now ISO` makes it reproducible);
+`--format jsonl` prints one promise per line.
+
+## States and exit codes
+
+| Computed state | Meaning |
+|---|---|
+| `conditional` | Waits on the promise named by `on`. |
+| `detached` | Owed now and unresolved. |
+| `overdue` | Detached and past its current deadline. |
+| `satisfied` | Debtor resolved it with evidence. |
+| `cancelled` | Debtor resolved it with a reason. |
+| `released` | Creditor let the debtor off. |
+| `expired` | Its antecedent ended without satisfaction. |
+
+`violated` is only published by an assessment. It is never a computed state.
+
+| Exit | Caller sees |
+|---|---|
+| `0` | Success. |
+| `1` | Operational failure: missing ledger on a read, unknown id, resolved promise, or ledger I/O. |
+| `2` | Malformed input or CLI usage. |
+
+Errors go to stderr. `ls`, `show`, `export`, and `a2a task` exit 1 if the
+ledger file is missing; an existing empty file reads as empty (exit 0).
+
+## Teach another agent
+
+Paste this into an AGENTS.md, CLAUDE.md, or agent prompt. Replace the path and identities:
+
+```text
+Track promises with pinki. Set PINKI_LEDGER to the shared ledger's absolute path.
+To declare work you owe, run pinki promise "WHAT" --by YOUR_AGENT_CARD_URI
+--to PEER_AGENT_CARD_URI --until ISO_8601_INSTANT. Keep the first tab-separated
+field of stdout as its id. Check with pinki ls --json and pinki show ID --json.
+When done, run pinki resolve ID --satisfied --evidence INSPECTABLE_REF.
+To move your deadline, run pinki amend ID --until ISO_8601_INSTANT --reason TEXT.
+If you cannot deliver, run pinki resolve ID --cancelled --reason TEXT.
+Exit 1 means a missing ledger, an unknown id, or an already-resolved promise
+(stderr says which). Exit 2 means a malformed command.
+```
+
+For A2A, advertise the card extension and merge the block into Task `metadata`.
+Your client sets `A2A-Extensions: https://github.com/azigler/pinki/ext/promise/v0`.
+
+```sh
+pinki a2a card
+pinki a2a task "$id"
+```
+
+`a2a task` emits this metadata shape (the id comes from the ledger):
 
 ```json
-{"format":"pinki-export","version":1,"summary":{"total":1,"states":{"cancelled":0,"conditional":0,"detached":1,"expired":0,"overdue":0,"released":0,"satisfied":0}},"promises":[{"id":"pnk_4f3a91","promise":"hand back a reviewed schema","by":"https://example.org/agents/reviewer","to":"https://example.org/agents/author","until":"2026-09-02T17:00:00Z","original_until":"2026-09-02T17:00:00Z","amendments":[],"state":"detached","resolution":null,"assessments":[],"created_at":"2026-08-28T20:14:03Z"}]}
+{"https://github.com/azigler/pinki/ext/promise/v0/promise": {"id": "pnk_4f3a91",
+  "promise": "Review the schema",
+  "by": "https://example.org/agents/reviewer", "to": "https://example.org/agents/author",
+  "until": "2030-01-02T00:00:00Z", "task": "a2a-task-91"
+}}
 ```
 
-`--format jsonl` prints one promise object per line, with no header or summary;
-an empty selection prints nothing. Filter with repeatable `--state`, `--debtor`,
-`--creditor`, and `--since` (inclusive on declaration time). `--now` sets the
-instant used for `overdue`; without it, pinki uses the current time as `ls` and
-`show` do. For byte-identical output across runs, pass `--now`. Promises are ordered
-by declaration time then id, and amendments and assessments by their event time.
-The current `until` still follows ledger order: the last amend wins even if event
-timestamps are out of order. A promise's `meta`, and each event's own `meta`, are
-carried without interpretation. The document leaves out the local ledger path, so
-copying the same ledger does not change its export.
+`pinki a2a` writes JSON to stdout; your A2A client sends it. pinki makes no network calls.
 
-## Prior art
+## Boundary and references
 
-Very little here is new, and the parts that aren't deserve the credit.
-
-The state machine comes from twenty-five years of multiagent-systems research on
-**commitments**. [Yolum & Singh's *Commitment
-Machines*](https://doi.org/10.1007/3-540-45448-9_17) (ATAL 2001) gave it
-`C(debtor, creditor, antecedent, consequent)` — which is what pinki's `by` / `to` /
-`on` are, renamed for people who haven't read the paper — and [Chopra &
-Singh](https://doi.org/10.1609/aaai.v29i1.9443) added deadlines to it in 2015. Mark
-Burgess's [Promise Theory](http://markburgess.org/PromiseMethod.pdf) supplied the
-hardest constraint, that assessment is subjective no matter which agent makes it;
-it is the reason pinki observes instead of adjudicating. And [FIPA's Contract Net
-Interaction Protocol](http://www.fipa.org/specs/fipa00029/SC00029H.html) had the
-deadline in the 1990s, with a `reply-by` on every call-for-proposals.
-
-Two projects landed on adjacent ground recently and independently. Both are worth
-your time. **[mentu-ai/protocol](https://github.com/mentu-ai/protocol)** goes
-further than pinki on integrity — a hash-chained JSONL ledger with state recomputed
-by replaying the log. **[proof-gate](https://github.com/1000larrylobster-source/proof-gate)**
-goes further on evidence: nothing closes until a restricted, read-only proof command
-exits 0, on the premise that an agent's self-report is worthless. If either fits your
-problem better, use it.
-
-Full accounting — including the parts pinki got wrong first — is in
-[docs/PRIOR-ART.md](docs/PRIOR-ART.md).
-
-## Docs
-
-- **[docs/DESIGN.md](docs/DESIGN.md)** — the nucleus: record, graph, states, log, CLI,
-  non-goals, and the honest limits.
-- **[docs/A2A-EXTENSION.md](docs/A2A-EXTENSION.md)** — the extension spec, checked
-  against `a2a.proto`.
-- **[docs/PRIOR-ART.md](docs/PRIOR-ART.md)** — what already exists, who got here
-  first, and what's actually new.
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — what would help most right now.
-
-## Contributing
-
-The design has already been corrected once by outside research — an earlier draft
-called this a broker that detects lapses, which overclaimed on both counts. Expect
-that to keep happening.
-
-If you've built something shaped like this, or you can see exactly where it breaks,
-[open an issue](https://github.com/azigler/pinki/issues/new/choose). That is precisely
-the conversation this repo exists for.
-
-## License
+`overdue` is deadline arithmetic. pinki never decides that a promise was broken.
+Read [DESIGN.md](docs/DESIGN.md), [A2A-EXTENSION.md](docs/A2A-EXTENSION.md),
+[PRIOR-ART.md](docs/PRIOR-ART.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
+[CHANGELOG.md](CHANGELOG.md) for the design, wire format, lineage, and changes.
 
 MIT — see [LICENSE](LICENSE).
 
----
-
-*pinki is an independent experiment. It builds on [A2A](https://a2a-protocol.org), a
-hosted project of the [Agentic AI Foundation](https://aaif.io); it is not affiliated
-with, endorsed by, or speaking for either.*
+*pinki builds on [A2A](https://a2a-protocol.org), an [AAIF](https://aaif.io)-hosted project. pinki is not affiliated with, endorsed by, or speaking for either.*

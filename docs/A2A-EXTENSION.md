@@ -119,6 +119,7 @@ On a `Task` whose work a promise is about:
 One key, one value: the promise record verbatim, exactly as
 [DESIGN.md § 1](DESIGN.md#1-the-record) defines it. At most one promise per Task
 under this extension.
+After an `amend`, `pinki a2a task` carries the current `until` in that record.
 
 The record may also carry `meta`: an optional, opaque object that the declaring
 system uses for its own provenance
