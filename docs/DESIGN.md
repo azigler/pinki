@@ -441,7 +441,7 @@ pinki resolve pnk_4f3a91 --released  --by author
 
 pinki assess  pnk_88de10 --violated --observer author --note "nothing shipped"
 
-pinki ls    [--open|--overdue|--by X|--to Y|--json]
+pinki ls    [--open|--overdue|--all] [--by X] [--to Y] [--json]
 pinki show  pnk_4f3a91 [--json]
 pinki export [--format json|jsonl] [--state STATE]... [--debtor URI] [--creditor URI] \
       [--since ISO] [--now ISO]
@@ -492,9 +492,11 @@ pipe them into whatever A2A client you already run — that is the whole integra
 story, and it is why there is no `a2a import`: getting data *out* of A2A is your
 client's job, and `pinki promise` reads JSON on stdin like everything else.
 
-The ledger is a file. `PINKI_LEDGER`, default `./.pinki/ledger.jsonl`. Every command
-reads and writes JSON, and touches nothing but that file. There is no state anywhere
-else, no daemon, and no network.
+The ledger is a file. `PINKI_LEDGER`, default `./.pinki/ledger.jsonl`. The first
+`promise` creates it. A read-only `ls`, `show`, `export`, or `a2a task` exits 1 if
+the file is missing; an existing empty file reads as empty. `a2a card` needs no
+ledger. Writing verbs append JSON events; read verbs print text or JSON. There is
+no state anywhere else, no daemon, and no network.
 
 ---
 

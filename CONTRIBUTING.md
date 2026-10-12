@@ -123,6 +123,7 @@ and anything in the "removes something" category.
 ## Pull request mechanics
 
 - One idea per PR. Small is easier to say yes to.
+- CI builds and tests with stable Rust; the project does not declare an MSRV.
 - **Commits: no convention.** Write a subject line a stranger could read. Don't
   spend time curating history — the diff and your reasoning are what get reviewed.
 - Update `docs/DESIGN.md` in the same PR if you change behavior. The doc is the
