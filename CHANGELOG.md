@@ -11,6 +11,33 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Added
+
+- **An observer can supersede its own assessment**
+  ([#1](https://github.com/azigler/pinki/issues/1)). `assess` takes
+  `--supersedes TS`, the `ts` of an earlier assessment of the same promise, as `show`
+  prints it. Pair it with `--violated` to correct the judgment, or with the new
+  `--retracted` to withdraw it. **Same author only**: the reference is read together with
+  `--observer`, and a `ts` that names another observer's assessment is refused (exit 1)
+  with the rule cited. The fold applies the same rule, so a hand-written line cannot get
+  round it. The earlier line stays in the ledger unchanged. The new line carries
+  `"supersedes":"<ts>"`, and `show` lists both: `superseded_by` (the replacing line's
+  `ts`, or `null`) and `supersedes` in `--json`, and a `superseded by` / `replaces` line
+  under each in text. A reference that matches nothing, matches two of your lines, or
+  names a line that is already superseded is refused, and nothing is appended. A second
+  assessment by the same observer of the same promise in one second is also refused;
+  retry in a second so each assessment can be named uniquely.
+- **`show` marks an assessment made after the resolution**
+  ([#4](https://github.com/azigler/pinki/issues/4)). `--json` carries
+  `"after_resolution": true|false` on every assessment. Once a promise is resolved, the
+  text block now prints `made before resolution` or `made after resolution` under
+  each assessment of a resolved promise.
+  The assessment is still accepted (exit 0): a dispute after the fact is a real speech
+  act (DESIGN.md §3). "After" is log order, like an amend's "latest".
+
+Older readers still read these ledgers. They ignore `supersedes` and show a retraction
+as an assessment whose `state` is `retracted`, beside the line it withdraws.
+
 ### Changed
 
 - Rewrote the README for agents. `scripts/check-readme.sh` runs every README shell

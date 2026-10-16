@@ -299,6 +299,26 @@ Two observers may publish contradicting assessments of the same promise. pinki w
 show you both. That is not a bug in pinki; it is the actual state of the world, and
 a tool that hid it would be lying to you.
 
+**An observer may supersede its own assessment, and nobody else's.** A wrong judgment
+that its author can never correct is not honest, only permanent. An observer whose
+mistakes are permanent publishes fewer assessments, later and more hedged (§7). So
+`assess --supersedes TS` publishes a new speech act by the same voice. It either
+corrects the earlier judgment (`--violated`) or withdraws it (`--retracted`). The
+earlier line stays in the log, and readers fold it as *superseded*. This erases nothing,
+and it adjudicates nothing: pinki records that the author changed its mind, and it says
+nothing about who was right. The same-author rule is the line that keeps it honest.
+Another observer who disagrees publishes its own assessment beside the first, as above.
+It can never mark someone else's assessment as superseded. The verb refuses that with
+the rule cited, and the fold enforces it too (§4).
+
+**An assessment made after the resolution is marked, never refused.** A dispute after
+the fact ("the evidence does not show what it claims") is a real speech act, and the
+contradicting-observers case above must survive it. But a reader has to be able to tell
+a judgment made while the promise was open from one made against a settled record. So
+`show` marks each one: `after_resolution` in `--json`, and `made before resolution` or
+`made after resolution` in text once the promise is resolved. That is all. Whether the
+late judgment matters is the reader's call.
+
 ---
 
 ## 4. The log
@@ -379,6 +399,41 @@ authority pinki does not have and should not pretend to — see §6.
 **`assess`** — publishes an assessment. Author, state, timestamp, optional note.
 Never terminal: an assessed promise stays exactly as open as it was.
 
+An assessment may also carry `supersedes`: the `ts` of an earlier assessment of the same
+promise **by the same observer** (§3).
+
+```jsonl
+{"ts":"2026-09-03T10:00:00Z","type":"assess","promise":"pnk_88de10","state":"retracted","observer":"…/author","note":"the work shipped; I missed it","supersedes":"2026-09-02T09:00:00Z"}
+```
+
+The reference is `ts` plus the event's own `observer`, and the observer is not repeated.
+That pair is what the log already carries, so a superseding line needs no new id space.
+It also survives a join: concatenating two ledgers changes every line's index, and it
+changes no line's `ts`. A line index would break on exactly the join §7 relies on. The
+fold reads `supersedes` with four rules:
+
+- **Same author.** It matches only lines whose `observer` equals the superseding line's.
+  A `supersedes` that names someone else's assessment matches nothing, so even a
+  hand-written line cannot erase another observer's judgment.
+- **Backward only.** It matches only lines earlier in the log. A line cannot supersede
+  something written after it, so there are no cycles to resolve.
+- **First supersede wins.** When two later lines name the same assessment, the first
+  one in the log is the one recorded as replacing it, as with `resolve`.
+- **First matching prior wins.** If a hand-written ledger has two earlier,
+  unsuperseded assessments by one observer at the referenced `ts`, one superseding
+  line marks only the first match in log order. A later superseding line can mark
+  the next unsuperseded match. The verb refuses this ambiguity for its own writes.
+
+`retracted` is the state word for a withdrawal. It is a judgment about the observer's
+own earlier speech act, not about the promise, so the verb accepts it only with
+`--supersedes`. A reader older than this field ignores `supersedes`, which is serde's
+default for a key it does not know. It shows the two lines side by side, unmarked,
+which is what it showed before.
+
+"After the resolution" is **log order**: an assessment appended after the winning
+`resolve` line. That is the same rule as an amend's "latest", for the same reason: the
+fold never compares event timestamps.
+
 **Unknown event types.** A reader that meets a `type` it does not know keeps the line,
 says so on stderr with its line number, and folds without it. That is not the same
 tolerance as skipping a line it could not parse at all — that one stays fatal, because
@@ -440,6 +495,8 @@ pinki resolve pnk_4f3a91 --cancelled --reason "upstream schema was withdrawn"
 pinki resolve pnk_4f3a91 --released  --by author
 
 pinki assess  pnk_88de10 --violated --observer author --note "nothing shipped"
+pinki assess  pnk_88de10 --retracted --observer author --supersedes 2026-09-02T09:00:00Z \
+      [--note "the work shipped; I missed it"]
 
 pinki ls    [--open|--overdue|--all] [--by X] [--to Y] [--json]
 pinki show  pnk_4f3a91 [--json]
@@ -563,6 +620,21 @@ have reads tasks and pipes JSON into `pinki promise` / `pinki assess`, and pinki
 records what it is told. When it publishes an assessment, that assessment is signed
 as one agent's opinion among the possible ones — which, per Burgess, is the only
 honest thing any assessment can be.
+
+**An opinion its author can revise is a more honest one.** If an observer's errors are
+permanent and cannot be qualified, it learns to publish less. It assesses later, hedges
+more, and stays silent where it is unsure. That is the observer §3 needs least. So an
+observer may supersede its own assessment (§3, §4). pinki does not authenticate anyone,
+so "same author" means the same `observer` string, the same trust as every other
+attribution in the log. The verb refuses a `--supersedes` from a different observer. The
+fold ignores one, so a looser writer gains nothing by writing it by hand.
+
+The reference has one known limit. `ts` is to the second, so two assessments by one
+observer of one promise in the same second cannot be told apart by it. The verb
+refuses a second assessment in that second and asks the observer to retry in a second.
+It also refuses an ambiguous reference from a hand-written ledger rather than guess.
+It refuses to supersede a line that is already superseded and points at the line that
+replaced it, so a run of corrections reads as one chain.
 
 ---
 

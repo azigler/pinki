@@ -219,6 +219,7 @@ fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
     let mut assessments: Vec<Assessment<'_>> = view
         .assessments
         .iter()
+        .map(|assessed| assessed.event)
         .filter_map(|event| match &event.body {
             EventBody::Assess {
                 state,

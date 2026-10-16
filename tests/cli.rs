@@ -1470,6 +1470,389 @@ fn assessing_an_unknown_id_fails_operationally() {
         .expect(1);
 }
 
+/// The `ts` of the `n`th assessment `show --json` lists for `id`.
+fn assessment_ts(scratch: &Scratch, id: &str, n: usize) -> String {
+    let show = scratch.run(&["show", id, "--json"]);
+    show.expect(0);
+    show.json()["assessments"][n]["ts"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no assessment {n} in {}", show.stdout))
+        .to_string()
+}
+
+#[test]
+fn the_measured_case_a_refuted_violation_reads_as_pre_resolution_then_superseded() {
+    // Issue #1's measured case: declare, go overdue, an observer publishes `violated`,
+    // the debtor resolves `satisfied` with evidence — and the judgment must not read as
+    // if nothing had answered it.
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship the schema", "debtor", "creditor", PAST);
+    assert_eq!(state_of(&scratch, &id), "overdue");
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--violated",
+            "--observer",
+            "watchdog",
+            "--note",
+            "horizon passed with no resolve recorded",
+        ])
+        .expect(0);
+    // Give the first line a prior second so the later same-observer retraction
+    // exercises superseding, not the one-second write guard.
+    scratch.rewrite(|n, event| {
+        if n == 1 {
+            event.insert("ts".into(), "2026-01-01T00:00:00Z".into());
+        }
+    });
+    scratch
+        .run(&["resolve", &id, "--satisfied", "--evidence", "sha:9c1f0e"])
+        .expect(0);
+
+    let show = scratch.run(&["show", &id, "--json"]);
+    show.expect(0);
+    let detail = show.json();
+    assert_eq!(detail["state"], "satisfied");
+    let first = &detail["assessments"][0];
+    assert_eq!(first["after_resolution"], false, "{}", show.stdout);
+    assert_eq!(first["superseded_by"], serde_json::Value::Null);
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(
+        text.stdout.contains(
+            "violated  watchdog  horizon passed with no resolve recorded\n      made     before resolution\n"
+        ),
+        "{:?}",
+        text.stdout
+    );
+
+    // The watchdog withdraws its own judgment.
+    let prior = assessment_ts(&scratch, &id, 0);
+    let original_line = scratch.lines()[1].clone();
+    let run = scratch.run(&[
+        "assess",
+        &id,
+        "--retracted",
+        "--supersedes",
+        &prior,
+        "--observer",
+        "watchdog",
+        "--note",
+        "the evidence answers it",
+    ]);
+    run.expect(0);
+    assert_eq!(run.state(), "satisfied");
+
+    // Append-only: the old line is byte-for-byte where it was, and the new one names it.
+    let lines = scratch.lines();
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[1], original_line);
+    let event: serde_json::Value = serde_json::from_str(&lines[3]).expect("valid JSON");
+    assert_eq!(event["state"], "retracted");
+    assert_eq!(event["supersedes"], prior.as_str());
+
+    let show = scratch.run(&["show", &id, "--json"]);
+    show.expect(0);
+    let detail = show.json();
+    assert_eq!(detail["state"], "satisfied");
+    let assessments = detail["assessments"].as_array().expect("assessments");
+    assert_eq!(
+        assessments.len(),
+        2,
+        "superseding keeps both: {}",
+        show.stdout
+    );
+    let later = assessments[1]["ts"].as_str().expect("a ts");
+    assert_eq!(assessments[0]["state"], "violated");
+    assert_eq!(assessments[0]["superseded_by"], later);
+    assert_eq!(assessments[0]["after_resolution"], false);
+    assert_eq!(assessments[1]["state"], "retracted");
+    assert_eq!(assessments[1]["supersedes"], prior.as_str());
+    assert_eq!(assessments[1]["superseded_by"], serde_json::Value::Null);
+    assert_eq!(assessments[1]["after_resolution"], true);
+
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(
+        text.stdout
+            .contains(&format!("      superseded by {later} (retracted)\n")),
+        "{:?}",
+        text.stdout
+    );
+    assert!(
+        text.stdout.contains(&format!(
+            "retracted  watchdog  the evidence answers it\n      made     after resolution\n      replaces {prior}\n"
+        )),
+        "{:?}",
+        text.stdout
+    );
+}
+
+#[test]
+fn another_observers_assessment_cannot_be_superseded() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship it", "debtor", "creditor", PAST);
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "watchdog"])
+        .expect(0);
+    let prior = assessment_ts(&scratch, &id, 0);
+    let before = scratch.lines();
+
+    for flag in ["--retracted", "--violated"] {
+        let run = scratch.run(&[
+            "assess",
+            &id,
+            flag,
+            "--supersedes",
+            &prior,
+            "--observer",
+            "debtor",
+        ]);
+        run.expect(1);
+        assert!(
+            run.stderr.contains("is watchdog's, not debtor's")
+                && run.stderr.contains("same author only, §3")
+                && run.stderr.contains("never erase another's judgment"),
+            "the refusal names the rule: {:?}",
+            run.stderr
+        );
+        assert_eq!(scratch.lines(), before, "nothing was appended");
+    }
+
+    // Disagreeing is still open to them — as their own speech act, beside it.
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "debtor"])
+        .expect(0);
+    let show = scratch.run(&["show", &id, "--json"]);
+    assert_eq!(
+        show.json()["assessments"][0]["superseded_by"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn an_assessment_after_the_resolution_is_accepted_and_marked() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship it", "debtor", "creditor", FUTURE);
+    scratch
+        .run(&["resolve", &id, "--satisfied", "--evidence", "sha:abc"])
+        .expect(0);
+
+    // Never refused: a post-hoc dispute is a real speech act (§3).
+    let run = scratch.run(&[
+        "assess",
+        &id,
+        "--violated",
+        "--observer",
+        "auditor",
+        "--note",
+        "the evidence does not show what it claims",
+    ]);
+    run.expect(0);
+    assert_eq!(run.state(), "satisfied");
+
+    let show = scratch.run(&["show", &id, "--json"]);
+    show.expect(0);
+    let assessment = &show.json()["assessments"][0];
+    assert_eq!(assessment["after_resolution"], true, "{}", show.stdout);
+    assert_eq!(assessment["observer"], "auditor");
+
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(
+        text.stdout.contains(
+            "violated  auditor  the evidence does not show what it claims\n      made     after resolution\n"
+        ),
+        "{:?}",
+        text.stdout
+    );
+}
+
+#[test]
+fn an_unresolved_promise_marks_nothing() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship it", "debtor", "creditor", PAST);
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "watchdog"])
+        .expect(0);
+    let show = scratch.run(&["show", &id, "--json"]);
+    let assessment = &show.json()["assessments"][0];
+    assert_eq!(assessment["after_resolution"], false);
+    assert_eq!(assessment["superseded_by"], serde_json::Value::Null);
+    assert!(assessment.get("supersedes").is_none(), "{}", show.stdout);
+    let text = scratch.run(&["show", &id]);
+    assert!(
+        text.stdout.ends_with("violated  watchdog\n"),
+        "{:?}",
+        text.stdout
+    );
+}
+
+#[test]
+fn a_retraction_must_name_what_it_retracts() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship it", "debtor", "creditor", PAST);
+    let before = scratch.lines();
+    let run = scratch.run(&["assess", &id, "--retracted", "--observer", "watchdog"]);
+    run.expect(2);
+    assert!(
+        run.stderr.contains("--retracted requires --supersedes"),
+        "{:?}",
+        run.stderr
+    );
+    assert_eq!(scratch.lines(), before);
+
+    // And it is one judgment or the other, never both.
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--violated",
+            "--retracted",
+            "--supersedes",
+            "x",
+            "--observer",
+            "watchdog",
+        ])
+        .expect(2);
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--violated",
+            "--supersedes",
+            " ",
+            "--observer",
+            "w",
+        ])
+        .expect(2);
+    assert_eq!(scratch.lines(), before);
+}
+
+#[test]
+fn a_supersedes_that_names_nothing_of_yours_is_refused_and_says_what_you_have() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship it", "debtor", "creditor", PAST);
+
+    let run = scratch.run(&[
+        "assess",
+        &id,
+        "--retracted",
+        "--supersedes",
+        "2020-01-01T00:00:00Z",
+        "--observer",
+        "watchdog",
+    ]);
+    run.expect(1);
+    assert!(
+        run.stderr.contains("watchdog has published no assessment"),
+        "{:?}",
+        run.stderr
+    );
+
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "watchdog"])
+        .expect(0);
+    let mine = assessment_ts(&scratch, &id, 0);
+    let run = scratch.run(&[
+        "assess",
+        &id,
+        "--retracted",
+        "--supersedes",
+        "2020-01-01T00:00:00Z",
+        "--observer",
+        "watchdog",
+    ]);
+    run.expect(1);
+    assert!(
+        run.stderr
+            .contains(&format!("watchdog's assessments of `{id}` are at {mine}")),
+        "{:?}",
+        run.stderr
+    );
+    assert_eq!(scratch.lines().len(), 2);
+}
+
+#[test]
+fn an_ambiguous_or_already_superseded_reference_is_refused() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship it", "debtor", "creditor", PAST);
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "watchdog"])
+        .expect(0);
+    // A hand-written duplicate reaches the read-side ambiguity guard.
+    let mut lines = scratch.lines();
+    lines.push(lines[1].clone());
+    fs::write(scratch.ledger(), format!("{}\n", lines.join("\n"))).expect("write ambiguous ledger");
+    scratch.rewrite(|n, event| {
+        if n > 0 {
+            event.insert("ts".into(), "2026-01-01T00:00:00Z".into());
+        }
+    });
+    let run = scratch.run(&[
+        "assess",
+        &id,
+        "--retracted",
+        "--supersedes",
+        "2026-01-01T00:00:00Z",
+        "--observer",
+        "watchdog",
+    ]);
+    run.expect(1);
+    assert!(run.stderr.contains("ambiguous"), "{:?}", run.stderr);
+
+    // Make them distinct, correct the first, then try to retract the original.
+    scratch.rewrite(|n, event| {
+        if n == 2 {
+            event.insert("ts".into(), "2026-01-02T00:00:00Z".into());
+        }
+    });
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--violated",
+            "--supersedes",
+            "2026-01-01T00:00:00Z",
+            "--observer",
+            "watchdog",
+            "--note",
+            "corrected: the second rung, not the first",
+        ])
+        .expect(0);
+    let correction = assessment_ts(&scratch, &id, 2);
+    let run = scratch.run(&[
+        "assess",
+        &id,
+        "--retracted",
+        "--supersedes",
+        "2026-01-01T00:00:00Z",
+        "--observer",
+        "watchdog",
+    ]);
+    run.expect(1);
+    assert!(
+        run.stderr
+            .contains(&format!("already superseded, by the one at {correction}")),
+        "{:?}",
+        run.stderr
+    );
+    let show = scratch.run(&["show", &id, "--json"]);
+    let assessments = show.json()["assessments"].clone();
+    assert_eq!(assessments[0]["superseded_by"], correction.as_str());
+    assert_eq!(assessments[1]["superseded_by"], serde_json::Value::Null);
+    assert_eq!(assessments[2]["supersedes"], "2026-01-01T00:00:00Z");
+    // A correction is a judgment, not a withdrawal: the text says which.
+    let text = scratch.run(&["show", &id]);
+    assert!(
+        text.stdout
+            .contains(&format!("      superseded by {correction} (violated)\n")),
+        "{:?}",
+        text.stdout
+    );
+}
+
 // ---------------------------------------------------------------------- ls
 
 #[test]
