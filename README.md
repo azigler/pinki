@@ -67,7 +67,11 @@ pinki ls --all
 ```
 
 `pinki assess ID --violated --observer WHO` publishes an attributed judgment
-without resolving the promise. `pinki export` gives a versioned JSON view (`--now ISO` makes it reproducible);
+without resolving the promise. An observer corrects or withdraws its own judgment with
+`--supersedes TS` (the earlier assessment's `ts` from `show`), plus `--violated` or
+`--retracted`. Only the same observer may supersede, and the earlier line stays in the
+ledger. `show` marks each assessment as superseded or not, and as made before or after
+the resolution (`after_resolution` in `--json`). `pinki export` gives a versioned JSON view (`--now ISO` makes it reproducible);
 `--format jsonl` prints one promise per line.
 
 ## States and exit codes

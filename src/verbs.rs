@@ -35,7 +35,7 @@ use crate::a2a;
 use crate::cli::{
     A2aCommand, AmendArgs, AssessArgs, Command, LsArgs, PromiseArgs, ResolveArgs, Scope, ShowArgs,
 };
-use crate::event::{Event, EventBody, Resolution};
+use crate::event::{Event, EventBody, Resolution, RETRACTED, VIOLATED};
 use crate::export;
 use crate::id;
 use crate::ledger;
@@ -517,6 +517,19 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
         Some(note) => Some(non_blank(note, "--note")?),
         None => None,
     };
+    let supersedes = match &args.supersedes {
+        Some(reference) => Some(non_blank(reference, "--supersedes")?),
+        None => None,
+    };
+    if args.retracted && supersedes.is_none() {
+        return Err(Fail::Usage(
+            "--retracted requires --supersedes TS: a retraction withdraws one of your own \
+             earlier assessments, so it has to name which one — by its `ts`, as `pinki show` \
+             prints it. Nothing was appended"
+                .into(),
+        ));
+    }
+    let state = if args.retracted { RETRACTED } else { VIOLATED };
     let meta = meta_flag(args.meta.as_deref())?;
 
     let mut events = read_ledger()?;
@@ -524,19 +537,117 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
 
     // An already-resolved promise may still be assessed. §4: an assessment is "never
     // terminal", and §3 wants contradicting judgments visible rather than suppressed
-    // by whoever wrote first.
-    if fold(&events, now).get(&args.id).is_none() {
-        return Err(unknown_id(&args.id, "assess"));
+    // by whoever wrote first. `show` marks one made after the resolution; it is never
+    // refused for it.
+    {
+        let folded = fold(&events, now);
+        let view = folded
+            .get(&args.id)
+            .ok_or_else(|| unknown_id(&args.id, "assess"))?;
+        if let Some(reference) = &supersedes {
+            check_supersedes(view, &observer, reference)?;
+        }
     }
 
     let event = Event::new(
         now.to_string(),
-        EventBody::violated(&args.id, observer, note).with_meta(meta),
+        EventBody::assessment(&args.id, state, observer, note, supersedes).with_meta(meta),
     );
     append(&event)?;
     events.push(event);
 
     report(&events, now, &args.id);
+    Ok(())
+}
+
+/// The `--supersedes` rules, checked before anything is appended.
+///
+/// The reference is a prior assessment's `ts`, read together with `--observer`: an
+/// observer may supersede **its own** judgment and nobody else's (§3). So the refusals,
+/// in the order a writer is likely to meet them:
+///
+/// - the `ts` names only somebody else's assessment — refused, citing the rule;
+/// - it names nothing of this observer's — refused, listing what it could name;
+/// - it names two of this observer's (two assessments in one second) — refused as
+///   ambiguous, rather than guessing which one was meant;
+/// - it names one already superseded — refused, pointing at the line that replaced it,
+///   so a chain of corrections stays a chain.
+///
+/// All four are operational (exit 1): the command is well formed, and the ledger is
+/// what says no. The fold enforces the first rule independently — it only ever matches
+/// a `supersedes` against the same observer's lines — so a looser writer cannot get
+/// round it either; this is where the writer gets told why.
+fn check_supersedes(view: &PromiseView, observer: &str, reference: &str) -> Result<(), Fail> {
+    let id = view.id();
+    let author_of = |event: &Event| match &event.body {
+        EventBody::Assess { observer, .. } => Some(observer.clone()),
+        _ => None,
+    };
+    let at_ts: Vec<_> = view
+        .assessments
+        .iter()
+        .filter(|assessed| assessed.event.ts == reference)
+        .collect();
+    let own: Vec<_> = at_ts
+        .iter()
+        .filter(|assessed| author_of(assessed.event).as_deref() == Some(observer))
+        .collect();
+
+    if own.is_empty() && !at_ts.is_empty() {
+        let mut others: Vec<String> = at_ts
+            .iter()
+            .filter_map(|assessed| author_of(assessed.event))
+            .collect();
+        others.sort();
+        others.dedup();
+        return Err(Fail::Op(format!(
+            "the assessment of `{id}` at {reference} is {}'s, not {observer}'s: an assessment \
+             may be superseded only by its own author (same author only, §3) — an observer \
+             may never erase another's judgment. To disagree with it, publish your own \
+             assessment without --supersedes; `pinki show` lists both. Nothing was appended",
+            others.join(", ")
+        )));
+    }
+
+    if own.is_empty() {
+        let mine: Vec<&str> = view
+            .assessments
+            .iter()
+            .filter(|assessed| author_of(assessed.event).as_deref() == Some(observer))
+            .map(|assessed| assessed.event.ts.as_str())
+            .collect();
+        let known = if mine.is_empty() {
+            format!("{observer} has published no assessment of `{id}` at all")
+        } else {
+            format!(
+                "{observer}'s assessments of `{id}` are at {}",
+                mine.join(", ")
+            )
+        };
+        return Err(Fail::Op(format!(
+            "--supersedes {reference} names no assessment of `{id}` by {observer}: the \
+             reference is the prior assessment's `ts`, exactly as `pinki show {id}` prints \
+             it, and {known}. Nothing was appended"
+        )));
+    }
+
+    if own.len() > 1 {
+        return Err(Fail::Op(format!(
+            "--supersedes {reference} is ambiguous: {observer} published {} assessments of \
+             `{id}` at that second, and pinki will not guess which one you mean. Nothing was \
+             appended",
+            own.len()
+        )));
+    }
+
+    if let Some(later) = own[0].superseded_by {
+        return Err(Fail::Op(format!(
+            "{observer}'s assessment of `{id}` at {reference} is already superseded, by the \
+             one at {}. Supersede that one instead, so the corrections read as one chain. \
+             Nothing was appended",
+            later.ts
+        )));
+    }
     Ok(())
 }
 
@@ -695,6 +806,18 @@ struct AssessmentJson<'a> {
     observer: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<&'a str>,
+    /// The `ts` of the same observer's earlier assessment this one replaces, as the
+    /// log carries it. Absent when it replaces nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supersedes: Option<&'a str>,
+    /// The `ts` of the same observer's later assessment that replaced this one, or
+    /// `null` while the observer stands by it. Always present, like `resolution`, so a
+    /// consumer tests it rather than probes for it.
+    superseded_by: Option<&'a str>,
+    /// Was this assessment appended after the promise's resolution? `false` on an
+    /// unresolved promise. A post-resolution assessment is accepted like any other —
+    /// this marks it, so it never reads as a judgment of a promise still open.
+    after_resolution: bool,
     /// The assess event's own provenance.
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<&'a Meta>,
@@ -754,21 +877,37 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     let assessments: Vec<AssessmentJson> = view
         .assessments
         .iter()
-        .filter_map(|event| match &event.body {
+        .filter_map(|assessed| match &assessed.event.body {
             EventBody::Assess {
                 state,
                 observer,
                 note,
+                supersedes,
                 meta,
                 ..
             } => Some(AssessmentJson {
-                ts: &event.ts,
+                ts: &assessed.event.ts,
                 state,
                 observer,
                 note: note.as_deref(),
+                supersedes: supersedes.as_deref(),
+                superseded_by: assessed.superseded_by.map(|later| later.ts.as_str()),
+                after_resolution: assessed.after_resolution,
                 meta: meta.as_ref(),
             }),
             _ => None,
+        })
+        .collect();
+    // The superseding line's own state, for the text block: "superseded by <ts>
+    // (retracted)" says whether the observer corrected itself or withdrew.
+    let superseding_state: Vec<Option<&str>> = view
+        .assessments
+        .iter()
+        .map(|assessed| {
+            assessed.superseded_by.and_then(|later| match &later.body {
+                EventBody::Assess { state, .. } => Some(state.as_str()),
+                _ => None,
+            })
         })
         .collect();
 
@@ -851,7 +990,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         println!("  assessments  (none)");
     } else {
         println!("  assessments");
-        for assessment in &assessments {
+        for (assessment, later_state) in assessments.iter().zip(superseding_state) {
             let note = assessment
                 .note
                 .map(|n| format!("  {n}"))
@@ -860,6 +999,25 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 "    {}  {}  {}{note}",
                 assessment.ts, assessment.state, assessment.observer
             );
+            // Its standing, one line each and only when there is something to say: an
+            // unresolved promise with no supersedes prints exactly what it always did.
+            // Once the promise is resolved, every assessment says which side of the
+            // resolution it was made on, because the two used to read alike (issue #4).
+            if resolution.is_some() {
+                let side = if assessment.after_resolution {
+                    "after resolution"
+                } else {
+                    "before resolution"
+                };
+                println!("      made     {side}");
+            }
+            if let Some(prior) = assessment.supersedes {
+                println!("      replaces {prior}");
+            }
+            if let Some(later) = assessment.superseded_by {
+                let state = later_state.map(|s| format!(" ({s})")).unwrap_or_default();
+                println!("      superseded by {later}{state}");
+            }
             if let Some(meta) = assessment.meta {
                 println!("      meta     {}", one_line(meta));
             }

@@ -118,8 +118,25 @@ pub struct PromiseView<'a> {
     /// Every `assess` event naming this promise, in log order. Never terminal, never
     /// consulted by the state computation — §4: "an assessed promise stays exactly as
     /// open as it was." Two contradicting assessments both appear here, which is §3's
-    /// point, not a bug.
-    pub assessments: Vec<&'a Event>,
+    /// point, not a bug. A superseded one appears too, marked rather than dropped.
+    pub assessments: Vec<Assessed<'a>>,
+}
+
+/// One `assess` event, with the two relations a reader needs to weigh it — both read
+/// off the log, neither of them a judgment pinki makes.
+#[derive(Debug, Clone, Copy)]
+pub struct Assessed<'a> {
+    /// The `assess` event itself, exactly as the log holds it.
+    pub event: &'a Event,
+    /// Did this line come **after** the winning `resolve` in the log? An assessment made
+    /// against a settled record is still a real speech act (§3's contradicting
+    /// observers), so it is never refused — but a reader must be able to tell it from
+    /// one made while the promise was open. "After" is log order, for the same reason
+    /// an amend's "latest" is: the fold never compares event timestamps.
+    pub after_resolution: bool,
+    /// The later assessment, **by the same observer**, that replaced this one — the
+    /// first such line in the log. `None` while the observer still stands by it.
+    pub superseded_by: Option<&'a Event>,
 }
 
 impl<'a> PromiseView<'a> {
@@ -232,7 +249,7 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
     let mut declared_at: HashMap<&'a str, &'a str> = HashMap::new();
     let mut amendments: HashMap<&'a str, Vec<Horizon<'a>>> = HashMap::new();
     let mut resolutions: HashMap<&'a str, &'a Event> = HashMap::new();
-    let mut assessments: HashMap<&'a str, Vec<&'a Event>> = HashMap::new();
+    let mut assessments: HashMap<&'a str, Vec<Assessed<'a>>> = HashMap::new();
 
     for event in events {
         match &event.body {
@@ -273,8 +290,40 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                 // First resolve wins.
                 resolutions.entry(promise.as_str()).or_insert(event);
             }
-            EventBody::Assess { promise, .. } => {
-                assessments.entry(promise.as_str()).or_default().push(event);
+            EventBody::Assess {
+                promise,
+                observer,
+                supersedes,
+                ..
+            } => {
+                let list = assessments.entry(promise.as_str()).or_default();
+                // Same author only, and backward only: the reference is this event's
+                // own observer plus a prior line's `ts`, so a `supersedes` naming
+                // anyone else's judgment matches nothing. Every earlier match not yet
+                // superseded is marked — the `assess` verb refuses an ambiguous
+                // reference, so more than one only reaches here from a joined or
+                // hand-written ledger, and marking all of them is the reading that
+                // does not depend on which one a writer meant.
+                if let Some(reference) = supersedes {
+                    for prior in list.iter_mut() {
+                        if prior.superseded_by.is_none()
+                            && prior.event.ts == *reference
+                            && matches!(
+                                &prior.event.body,
+                                EventBody::Assess { observer: author, .. } if author == observer
+                            )
+                        {
+                            prior.superseded_by = Some(event);
+                        }
+                    }
+                }
+                list.push(Assessed {
+                    event,
+                    // The winning resolve is the first in the log, so "is there one
+                    // yet?" at this line is exactly "did this line come after it?".
+                    after_resolution: resolutions.contains_key(promise.as_str()),
+                    superseded_by: None,
+                });
             }
             // An event type this build does not know changes nothing it could compute.
             // The line is not lost — it is still in the file, and `ledger::read_at`
@@ -1137,6 +1186,129 @@ mod tests {
         assert_eq!(
             fold(&[promise("pnk_a", None, UNTIL)], ts(AFTER)).state("pnk_a"),
             Some(State::Overdue)
+        );
+    }
+
+    /// An assessment of `id` by `observer` at `ts`, optionally superseding `supersedes`.
+    fn assessed_by(
+        id: &str,
+        ts: &str,
+        observer: &str,
+        state: &str,
+        supersedes: Option<&str>,
+    ) -> Event {
+        Event::new(
+            ts,
+            EventBody::assessment(id, state, observer, None, supersedes.map(str::to_string)),
+        )
+    }
+
+    #[test]
+    fn an_assessment_after_the_winning_resolve_is_marked_and_one_before_is_not() {
+        let log = [
+            promise("pnk_a", None, UNTIL),
+            assessed_by("pnk_a", "2026-09-02T09:00:00Z", "…/w", "violated", None),
+            satisfied("pnk_a"),
+            assessed_by("pnk_a", "2026-09-03T09:00:00Z", "…/x", "violated", None),
+            // A second resolve is ignored, and does not move the line "after" is measured from.
+            cancelled("pnk_a"),
+        ];
+        let folded = fold(&log, ts(AFTER));
+        let view = folded.get("pnk_a").unwrap();
+        assert_eq!(view.state, State::Satisfied);
+        let after: Vec<bool> = view
+            .assessments
+            .iter()
+            .map(|a| a.after_resolution)
+            .collect();
+        assert_eq!(after, [false, true]);
+        // Unresolved: nothing is after a resolution that has not happened.
+        let open = [promise("pnk_b", None, UNTIL), assessed("pnk_b")];
+        assert!(!fold(&open, ts(AFTER)).get("pnk_b").unwrap().assessments[0].after_resolution);
+    }
+
+    #[test]
+    fn a_same_author_supersede_marks_the_prior_and_keeps_it() {
+        let log = [
+            promise("pnk_a", None, UNTIL),
+            assessed_by("pnk_a", "2026-09-02T09:00:00Z", "…/w", "violated", None),
+            assessed_by("pnk_a", "2026-09-02T09:00:00Z", "…/x", "violated", None),
+            assessed_by(
+                "pnk_a",
+                "2026-09-04T09:00:00Z",
+                "…/w",
+                "retracted",
+                Some("2026-09-02T09:00:00Z"),
+            ),
+        ];
+        let folded = fold(&log, ts(AFTER));
+        let view = folded.get("pnk_a").unwrap();
+        // All three lines are still there — superseding marks, it never removes.
+        assert_eq!(view.assessments.len(), 3);
+        let by = view.assessments[0]
+            .superseded_by
+            .expect("w's own is superseded");
+        assert_eq!(by.ts, "2026-09-04T09:00:00Z");
+        // x shares the `ts`, but not the author: its judgment stands.
+        assert!(view.assessments[1].superseded_by.is_none());
+        assert!(view.assessments[2].superseded_by.is_none());
+        // And the computed state never saw any of it.
+        assert_eq!(view.state, State::Overdue);
+    }
+
+    #[test]
+    fn a_supersedes_naming_another_observer_or_a_later_line_matches_nothing() {
+        let log = [
+            promise("pnk_a", None, UNTIL),
+            // y points at x's line: a hand-written attempt to erase another's judgment.
+            assessed_by("pnk_a", "2026-09-02T09:00:00Z", "…/x", "violated", None),
+            assessed_by(
+                "pnk_a",
+                "2026-09-03T09:00:00Z",
+                "…/y",
+                "retracted",
+                Some("2026-09-02T09:00:00Z"),
+            ),
+            // z points forward at its own later line: supersedes only reaches backward.
+            assessed_by(
+                "pnk_a",
+                "2026-09-04T09:00:00Z",
+                "…/z",
+                "retracted",
+                Some("2026-09-05T09:00:00Z"),
+            ),
+            assessed_by("pnk_a", "2026-09-05T09:00:00Z", "…/z", "violated", None),
+        ];
+        let folded = fold(&log, ts(AFTER));
+        let view = folded.get("pnk_a").unwrap();
+        assert!(view.assessments.iter().all(|a| a.superseded_by.is_none()));
+    }
+
+    #[test]
+    fn the_first_supersede_in_the_log_is_the_one_that_counts() {
+        let log = [
+            promise("pnk_a", None, UNTIL),
+            assessed_by("pnk_a", "2026-09-02T09:00:00Z", "…/w", "violated", None),
+            assessed_by(
+                "pnk_a",
+                "2026-09-03T09:00:00Z",
+                "…/w",
+                "violated",
+                Some("2026-09-02T09:00:00Z"),
+            ),
+            assessed_by(
+                "pnk_a",
+                "2026-09-04T09:00:00Z",
+                "…/w",
+                "retracted",
+                Some("2026-09-02T09:00:00Z"),
+            ),
+        ];
+        let folded = fold(&log, ts(AFTER));
+        let view = folded.get("pnk_a").unwrap();
+        assert_eq!(
+            view.assessments[0].superseded_by.map(|e| e.ts.as_str()),
+            Some("2026-09-03T09:00:00Z")
         );
     }
 

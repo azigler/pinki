@@ -49,6 +49,15 @@ use crate::record::{Meta, Promise};
 /// something that knows an assessment word we do not.
 pub const VIOLATED: &str = "violated";
 
+/// The word an observer publishes when it withdraws one of its own assessments.
+///
+/// Not a judgment about the promise — a judgment about the observer's own earlier
+/// speech act — so it only ever travels with `supersedes` (the `assess` verb refuses
+/// it otherwise). A reader that has never heard of `supersedes` still reads it as an
+/// attributed assessment with an unfamiliar word in `state`, which is the honest
+/// degradation: it shows both lines, bare, exactly as it did before this field existed.
+pub const RETRACTED: &str = "retracted";
+
 /// One line of the ledger.
 ///
 /// `ts` is kept as the raw ISO-8601 string it arrived as. The fold never compares
@@ -161,6 +170,15 @@ pub enum EventBody {
         observer: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// The `ts` of an earlier assessment **by this same observer, of this same
+        /// promise**, that this one replaces. The observer is not repeated: same-author
+        /// is the rule (§3), so the reference is this event's own `observer` plus the
+        /// prior event's `ts`, and the fold matches on both. A `supersedes` naming
+        /// another observer's assessment therefore matches nothing — nobody can erase
+        /// another's judgment, not even by hand-writing a line. The prior line stays in
+        /// the log; readers fold it as superseded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supersedes: Option<String>,
         /// Opaque provenance for the act of assessing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<Meta>,
@@ -275,17 +293,33 @@ impl EventBody {
         }
     }
 
-    /// An `assess` event publishing [`VIOLATED`].
+    /// An `assess` event publishing [`VIOLATED`], superseding nothing. The tests' and
+    /// examples' shorthand; the verb builds every assessment through
+    /// [`EventBody::assessment`].
+    #[cfg(test)]
     pub fn violated(
         promise: impl Into<String>,
         observer: impl Into<String>,
         note: Option<String>,
     ) -> Self {
+        EventBody::assessment(promise, VIOLATED, observer, note, None)
+    }
+
+    /// An `assess` event in general: any asserted state, optionally superseding an
+    /// earlier assessment by the same observer (named by its `ts`).
+    pub fn assessment(
+        promise: impl Into<String>,
+        state: impl Into<String>,
+        observer: impl Into<String>,
+        note: Option<String>,
+        supersedes: Option<String>,
+    ) -> Self {
         EventBody::Assess {
             promise: promise.into(),
-            state: VIOLATED.to_string(),
+            state: state.into(),
             observer: observer.into(),
             note,
+            supersedes,
             meta: None,
         }
     }
@@ -448,6 +482,55 @@ mod tests {
             serde_json::to_string(&ev).unwrap(),
             r#"{"ts":"2026-09-02T09:00:00Z","type":"assess","promise":"pnk_88de10","state":"violated","observer":"…/author","note":"nothing shipped, no reason given"}"#
         );
+    }
+
+    #[test]
+    fn a_superseding_assessment_carries_the_prior_ts_after_the_note_and_before_meta() {
+        let ev = Event::new(
+            "2026-09-03T10:00:00Z",
+            EventBody::assessment(
+                "pnk_88de10",
+                RETRACTED,
+                "…/author",
+                Some("the evidence landed after all".into()),
+                Some("2026-09-02T09:00:00Z".into()),
+            )
+            .with_meta(Some(meta(r#"{"by":"watchdog"}"#))),
+        );
+        let text = serde_json::to_string(&ev).unwrap();
+        assert_eq!(
+            text,
+            r#"{"ts":"2026-09-03T10:00:00Z","type":"assess","promise":"pnk_88de10","state":"retracted","observer":"…/author","note":"the evidence landed after all","supersedes":"2026-09-02T09:00:00Z","meta":{"by":"watchdog"}}"#
+        );
+        let back: Event = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, ev);
+        // An ordinary assessment carries no reference, and writes no key for one — and
+        // a line written before the field existed reads back as superseding nothing.
+        let plain = EventBody::violated("pnk_1", "…/author", None);
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("supersedes"));
+        let old: Event = serde_json::from_str(
+            r#"{"ts":"2026-09-02T09:00:00Z","type":"assess","promise":"pnk_1","state":"violated","observer":"…/author"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old.body,
+            EventBody::Assess {
+                supersedes: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_assess_line_with_a_key_this_build_does_not_know_still_reads() {
+        // The forward-compatibility claim `supersedes` rests on: a reader older than a
+        // field ignores it rather than failing the line, which is how a v0.4.0 reader
+        // meets `supersedes` — and how this one meets whatever comes next.
+        let line = r#"{"ts":"2026-09-02T09:00:00Z","type":"assess","promise":"pnk_1","state":"retracted","observer":"…/author","supersedes":"2026-09-01T09:00:00Z","in_reply_to":"something newer"}"#;
+        let ev: Event = serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(ev.subject(), "pnk_1");
     }
 
     #[test]

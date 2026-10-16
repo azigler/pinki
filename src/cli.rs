@@ -152,13 +152,23 @@ pub struct ResolveArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("judgment")
+        .required(true)
+        .multiple(false)
+        .args(["violated", "retracted"])
+))]
 pub struct AssessArgs {
     /// The promise being assessed.
     pub id: String,
 
     /// Assert that this promise was broken. A judgment, attributed to --observer.
-    #[arg(long, required = true)]
+    #[arg(long)]
     pub violated: bool,
+
+    /// Withdraw one of your own earlier assessments. Requires --supersedes.
+    #[arg(long)]
+    pub retracted: bool,
 
     /// Who is making the assessment.
     #[arg(long, required = true, value_name = "WHO")]
@@ -167,6 +177,11 @@ pub struct AssessArgs {
     /// Free text supporting the assessment.
     #[arg(long, value_name = "TEXT")]
     pub note: Option<String>,
+
+    /// Replace an earlier assessment of this promise by the SAME --observer, named by
+    /// its `ts` as `show` prints it. The earlier line stays in the log, marked superseded.
+    #[arg(long, value_name = "TS")]
+    pub supersedes: Option<String>,
 
     /// Opaque provenance for this assessment, as a JSON object. Never read.
     #[arg(long, value_name = "JSON")]
