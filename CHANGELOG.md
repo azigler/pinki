@@ -24,11 +24,14 @@ tools can depend on them, not merely read them.
   `"supersedes":"<ts>"`, and `show` lists both: `superseded_by` (the replacing line's
   `ts`, or `null`) and `supersedes` in `--json`, and a `superseded by` / `replaces` line
   under each in text. A reference that matches nothing, matches two of your lines, or
-  names a line that is already superseded is refused, and nothing is appended.
+  names a line that is already superseded is refused, and nothing is appended. A second
+  assessment by the same observer of the same promise in one second is also refused;
+  retry in a second so each assessment can be named uniquely.
 - **`show` marks an assessment made after the resolution**
   ([#4](https://github.com/azigler/pinki/issues/4)). `--json` carries
   `"after_resolution": true|false` on every assessment. Once a promise is resolved, the
-  text block says `made before resolution` or `made after resolution` under each one.
+  text block now prints `made before resolution` or `made after resolution` under
+  each assessment of a resolved promise.
   The assessment is still accepted (exit 0): a dispute after the fact is a real speech
   act (DESIGN.md §3). "After" is log order, like an amend's "latest".
 

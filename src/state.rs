@@ -299,22 +299,19 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                 let list = assessments.entry(promise.as_str()).or_default();
                 // Same author only, and backward only: the reference is this event's
                 // own observer plus a prior line's `ts`, so a `supersedes` naming
-                // anyone else's judgment matches nothing. Every earlier match not yet
-                // superseded is marked — the `assess` verb refuses an ambiguous
-                // reference, so more than one only reaches here from a joined or
-                // hand-written ledger, and marking all of them is the reading that
-                // does not depend on which one a writer meant.
+                // anyone else's judgment matches nothing. For a hand-written
+                // ambiguous reference, only the first matching unsuperseded prior
+                // is marked, as with resolve's first-wins rule.
                 if let Some(reference) = supersedes {
-                    for prior in list.iter_mut() {
-                        if prior.superseded_by.is_none()
+                    if let Some(prior) = list.iter_mut().find(|prior| {
+                        prior.superseded_by.is_none()
                             && prior.event.ts == *reference
                             && matches!(
                                 &prior.event.body,
                                 EventBody::Assess { observer: author, .. } if author == observer
                             )
-                        {
-                            prior.superseded_by = Some(event);
-                        }
+                    }) {
+                        prior.superseded_by = Some(event);
                     }
                 }
                 list.push(Assessed {
@@ -1310,6 +1307,33 @@ mod tests {
             view.assessments[0].superseded_by.map(|e| e.ts.as_str()),
             Some("2026-09-03T09:00:00Z")
         );
+    }
+
+    #[test]
+    fn ambiguous_reference_marks_only_the_first_unsuperseded_prior() {
+        let at = "2026-09-02T09:00:00Z";
+        let first_replacement = "2026-09-03T09:00:00Z";
+        let second_replacement = "2026-09-04T09:00:00Z";
+        let log = [
+            promise("pnk_a", None, UNTIL),
+            assessed_by("pnk_a", at, "…/w", "violated", None),
+            assessed_by("pnk_a", at, "…/w", "violated", None),
+            assessed_by("pnk_a", first_replacement, "…/w", "retracted", Some(at)),
+            assessed_by("pnk_a", second_replacement, "…/w", "retracted", Some(at)),
+        ];
+        let folded = fold(&log, ts(AFTER));
+        let view = folded.get("pnk_a").unwrap();
+        assert_eq!(view.assessments.len(), 4);
+        assert_eq!(
+            view.assessments[0].superseded_by.map(|e| e.ts.as_str()),
+            Some(first_replacement)
+        );
+        assert_eq!(
+            view.assessments[1].superseded_by.map(|e| e.ts.as_str()),
+            Some(second_replacement)
+        );
+        assert!(view.assessments[2].superseded_by.is_none());
+        assert!(view.assessments[3].superseded_by.is_none());
     }
 
     #[test]

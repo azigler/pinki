@@ -410,7 +410,7 @@ The reference is `ts` plus the event's own `observer`, and the observer is not r
 That pair is what the log already carries, so a superseding line needs no new id space.
 It also survives a join: concatenating two ledgers changes every line's index, and it
 changes no line's `ts`. A line index would break on exactly the join §7 relies on. The
-fold reads `supersedes` with three rules:
+fold reads `supersedes` with four rules:
 
 - **Same author.** It matches only lines whose `observer` equals the superseding line's.
   A `supersedes` that names someone else's assessment matches nothing, so even a
@@ -419,6 +419,10 @@ fold reads `supersedes` with three rules:
   something written after it, so there are no cycles to resolve.
 - **First supersede wins.** When two later lines name the same assessment, the first
   one in the log is the one recorded as replacing it, as with `resolve`.
+- **First matching prior wins.** If a hand-written ledger has two earlier,
+  unsuperseded assessments by one observer at the referenced `ts`, one superseding
+  line marks only the first match in log order. A later superseding line can mark
+  the next unsuperseded match. The verb refuses this ambiguity for its own writes.
 
 `retracted` is the state word for a withdrawal. It is a judgment about the observer's
 own earlier speech act, not about the promise, so the verb accepts it only with
@@ -626,10 +630,11 @@ attribution in the log. The verb refuses a `--supersedes` from a different obser
 fold ignores one, so a looser writer gains nothing by writing it by hand.
 
 The reference has one known limit. `ts` is to the second, so two assessments by one
-observer of one promise in the same second cannot be told apart by it. The verb refuses
-such a reference as ambiguous rather than guess. It also refuses to supersede a line
-that is already superseded, and points at the line that replaced it, so a run of
-corrections reads as one chain.
+observer of one promise in the same second cannot be told apart by it. The verb
+refuses a second assessment in that second and asks the observer to retry in a second.
+It also refuses an ambiguous reference from a hand-written ledger rather than guess.
+It refuses to supersede a line that is already superseded and points at the line that
+replaced it, so a run of corrections reads as one chain.
 
 ---
 

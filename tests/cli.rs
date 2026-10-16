@@ -1499,6 +1499,13 @@ fn the_measured_case_a_refuted_violation_reads_as_pre_resolution_then_superseded
             "horizon passed with no resolve recorded",
         ])
         .expect(0);
+    // Give the first line a prior second so the later same-observer retraction
+    // exercises superseding, not the one-second write guard.
+    scratch.rewrite(|n, event| {
+        if n == 1 {
+            event.insert("ts".into(), "2026-01-01T00:00:00Z".into());
+        }
+    });
     scratch
         .run(&["resolve", &id, "--satisfied", "--evidence", "sha:9c1f0e"])
         .expect(0);
@@ -1771,12 +1778,13 @@ fn a_supersedes_that_names_nothing_of_yours_is_refused_and_says_what_you_have() 
 fn an_ambiguous_or_already_superseded_reference_is_refused() {
     let scratch = Scratch::new();
     let id = scratch.promise("ship it", "debtor", "creditor", PAST);
-    for _ in 0..2 {
-        scratch
-            .run(&["assess", &id, "--violated", "--observer", "watchdog"])
-            .expect(0);
-    }
-    // Two assessments in one second, by one observer: pinki will not guess.
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "watchdog"])
+        .expect(0);
+    // A hand-written duplicate reaches the read-side ambiguity guard.
+    let mut lines = scratch.lines();
+    lines.push(lines[1].clone());
+    fs::write(scratch.ledger(), format!("{}\n", lines.join("\n"))).expect("write ambiguous ledger");
     scratch.rewrite(|n, event| {
         if n > 0 {
             event.insert("ts".into(), "2026-01-01T00:00:00Z".into());

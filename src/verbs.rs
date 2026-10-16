@@ -534,6 +534,7 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
+    let now_ts = now.to_string();
 
     // An already-resolved promise may still be assessed. §4: an assessment is "never
     // terminal", and §3 wants contradicting judgments visible rather than suppressed
@@ -547,16 +548,41 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
         if let Some(reference) = &supersedes {
             check_supersedes(view, &observer, reference)?;
         }
+        check_assessment_timestamp(&events, &args.id, &observer, &now_ts)?;
     }
 
     let event = Event::new(
-        now.to_string(),
+        now_ts,
         EventBody::assessment(&args.id, state, observer, note, supersedes).with_meta(meta),
     );
     append(&event)?;
     events.push(event);
 
     report(&events, now, &args.id);
+    Ok(())
+}
+
+/// A timestamp and observer must name at most one assessment of a promise.
+fn check_assessment_timestamp(
+    events: &[Event],
+    id: &str,
+    observer: &str,
+    now_ts: &str,
+) -> Result<(), Fail> {
+    if events.iter().any(|event| {
+        event.ts == now_ts
+            && matches!(
+                &event.body,
+                EventBody::Assess { promise, observer: author, .. }
+                    if promise == id && author == observer
+            )
+    }) {
+        return Err(Fail::Op(format!(
+            "{observer} already assessed `{id}` at {now_ts}: timestamps have one-second \
+             precision, so another assessment now would share its reference and could not \
+             be superseded unambiguously. Retry in a second. Nothing was appended"
+        )));
+    }
     Ok(())
 }
 
@@ -1272,6 +1298,24 @@ fn ellipsize(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assessment_timestamp_is_unique_per_promise_and_observer() {
+        let at = "2026-09-02T09:00:00Z";
+        let events = [Event::new(
+            at,
+            EventBody::assessment("pnk_a", VIOLATED, "watchdog", None, None),
+        )];
+        let err = check_assessment_timestamp(&events, "pnk_a", "watchdog", at).unwrap_err();
+        assert_eq!(err.code(), 1);
+        assert!(err.to_string().contains("Retry in a second"), "{err}");
+        assert!(check_assessment_timestamp(&events, "pnk_a", "auditor", at).is_ok());
+        assert!(check_assessment_timestamp(&events, "pnk_b", "watchdog", at).is_ok());
+        assert!(
+            check_assessment_timestamp(&events, "pnk_a", "watchdog", "2026-09-02T09:00:01Z")
+                .is_ok()
+        );
+    }
 
     #[test]
     fn exit_codes_split_malformed_from_operational() {
