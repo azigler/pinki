@@ -13,6 +13,13 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- `promise`, `resolve`, `assess`, and `amend` accept `--ts ISO`; a stdin promise
+  record may carry `ts`. New events label timestamp `source` as `supplied` or
+  `cli`. Supplied timestamps may be past but at most 300 seconds ahead of the
+  current clock. `show --json` and `ls --json` now expose declaration `ts` and
+  event sources; text `show` marks supplied timestamps. Older rows keep source
+  absent. Assessment timestamp uniqueness also applies to supplied times.
+
 - **An observer can supersede its own assessment**
   ([#1](https://github.com/azigler/pinki/issues/1)). `assess` takes
   `--supersedes TS`, the `ts` of an earlier assessment of the same promise, as `show`

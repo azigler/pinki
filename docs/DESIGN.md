@@ -325,6 +325,20 @@ late judgment matters is the reader's call.
 
 Append-only JSONL. Four event types. State is a fold over the log.
 
+Every new CLI line has a `source` beside its `ts`: `cli` means pinki stamped the
+current second at append; `supplied` means the caller passed `--ts ISO` (or `ts` in
+a stdin promise record). All four write verbs accept `--ts`. A supplied timestamp
+may be in the past. The CLI refuses one more than 300 seconds beyond its current
+clock, citing this rule. It normalizes accepted instants to UTC seconds so an
+assessment's timestamp and observer remain a unique reference (§7). This label
+describes the write path, not proof that an event happened then (§8.5).
+
+Older lines without `source` keep it **absent** in the read model. Guessing `cli`
+would mislabel history written by another tool. `show --json` and `ls --json` expose
+the declaration's `ts` and `source`; `show --json` also exposes `source` on each
+horizon, resolution, and assessment. Text `show` labels only supplied timestamps.
+The fold still uses log order, not event timestamps.
+
 ```jsonl
 {"ts":"2026-08-28T20:14:03Z","type":"promise","id":"pnk_4f3a91","promise":"hand back a reviewed schema","by":"…/reviewer","to":"…/author","on":"pnk_0c2b77","until":"2026-09-01T17:00:00Z"}
 {"ts":"2026-09-01T16:40:00Z","type":"amend","promise":"pnk_4f3a91","by":"…/reviewer","until":"2026-09-01T18:00:00Z","reason":"the draft schema landed late"}
@@ -688,5 +702,8 @@ so the answer stays where the question was. Opinions wanted — see
    record or N?
 5. **Signing.** Assessments are attributed but not cryptographically signed.
    Where's the line between useful and ceremony?
+   A timestamp's `source` labels whether pinki stamped it or a caller supplied it
+   (§4). Neither label authenticates the timestamp or the actor. This does not
+   settle the signing question.
 6. **Is `expired` worth keeping?** It is Singh-correct and it may be a distinction
    nobody in practice needs.

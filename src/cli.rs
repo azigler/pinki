@@ -54,6 +54,10 @@ pub struct PromiseArgs {
     /// The thing owed, as free text. Omit it to read a full record as JSON on stdin.
     pub text: Option<String>,
 
+    /// Event timestamp for importing history; defaults to the current second.
+    #[arg(long, value_name = "ISO")]
+    pub ts: Option<String>,
+
     /// The debtor — who owes. An A2A AgentCard identity.
     #[arg(long, value_name = "WHO")]
     pub by: Option<String>,
@@ -90,6 +94,10 @@ pub struct AmendArgs {
     /// The promise whose deadline is moving.
     pub id: String,
 
+    /// Event timestamp for importing history; defaults to the current second.
+    #[arg(long, value_name = "ISO")]
+    pub ts: Option<String>,
+
     /// The new deadline, as an ISO-8601 instant with an offset (e.g. 2026-09-01T17:30Z).
     /// It may be earlier than the current one: deadlines move both ways.
     #[arg(long, required = true, value_name = "ISO")]
@@ -119,6 +127,10 @@ pub struct AmendArgs {
 pub struct ResolveArgs {
     /// The promise being resolved.
     pub id: String,
+
+    /// Event timestamp for importing history; defaults to the current second.
+    #[arg(long, value_name = "ISO")]
+    pub ts: Option<String>,
 
     /// Resolved by the debtor, with evidence. Requires --evidence.
     #[arg(long)]
@@ -161,6 +173,10 @@ pub struct ResolveArgs {
 pub struct AssessArgs {
     /// The promise being assessed.
     pub id: String,
+
+    /// Event timestamp for importing history; defaults to the current second.
+    #[arg(long, value_name = "ISO")]
+    pub ts: Option<String>,
 
     /// Assert that this promise was broken. A judgment, attributed to --observer.
     #[arg(long)]

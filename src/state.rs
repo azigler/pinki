@@ -85,6 +85,8 @@ impl std::fmt::Display for State {
 pub struct Horizon<'a> {
     /// The `ts` of the event that spoke this horizon.
     pub ts: &'a str,
+    /// How this event's timestamp was obtained, if the ledger line says.
+    pub source: Option<&'a str>,
     /// The deadline as of that event.
     pub until: &'a str,
     /// Who spoke it: the debtor on the declaration, the amender on an `amend`.
@@ -246,7 +248,7 @@ impl<'a> Fold<'a> {
 pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
     let mut order: Vec<&'a str> = Vec::new();
     let mut records: HashMap<&'a str, &'a Promise> = HashMap::new();
-    let mut declared_at: HashMap<&'a str, &'a str> = HashMap::new();
+    let mut declared_at: HashMap<&'a str, &'a Event> = HashMap::new();
     let mut amendments: HashMap<&'a str, Vec<Horizon<'a>>> = HashMap::new();
     let mut resolutions: HashMap<&'a str, &'a Event> = HashMap::new();
     let mut assessments: HashMap<&'a str, Vec<Assessed<'a>>> = HashMap::new();
@@ -258,7 +260,7 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                 // re-declaration silently move a deadline.
                 if let Entry::Vacant(slot) = records.entry(record.id.as_str()) {
                     slot.insert(record);
-                    declared_at.insert(record.id.as_str(), event.ts.as_str());
+                    declared_at.insert(record.id.as_str(), event);
                     order.push(record.id.as_str());
                 }
             }
@@ -278,6 +280,7 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                     .or_default()
                     .push(Horizon {
                         ts: event.ts.as_str(),
+                        source: event.source.as_deref(),
                         until: until.as_str(),
                         by: by.as_str(),
                         reason: reason.as_deref(),
@@ -354,7 +357,13 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
             // Declaration first, then every amend in log order. The declaration's `by`
             // is the debtor's: speaking a promise sets its first horizon.
             let mut horizons = vec![Horizon {
-                ts: declared_at.get(id).copied().unwrap_or_default(),
+                ts: declared_at
+                    .get(id)
+                    .map(|event| event.ts.as_str())
+                    .unwrap_or_default(),
+                source: declared_at
+                    .get(id)
+                    .and_then(|event| event.source.as_deref()),
                 until: record.until.as_str(),
                 by: record.by.as_str(),
                 reason: None,

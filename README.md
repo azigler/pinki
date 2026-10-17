@@ -37,6 +37,12 @@ printf '%s\n' "$receipt"
 your own id (avoid the reserved `pnk_` prefix; not one already declared).
 Otherwise pinki mints `pnk_` plus six hex digits.
 
+For a historical import, add `--ts ISO` to `promise`, `amend`, `resolve`, or
+`assess`, or put `ts` in a promise record on stdin. The event gets
+`"source":"supplied"`; without it pinki records `"source":"cli"`. The timestamp
+may be past, but only 300 seconds ahead of the current clock. `show --json` and
+`ls --json` include the declaration `ts`; `show` marks supplied event times.
+
 ## Check, change, and finish it
 
 `ls` shows open promises by default. Add `--overdue` for the overdue subset,
