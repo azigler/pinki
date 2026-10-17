@@ -36,6 +36,10 @@ pub enum State {
     Cancelled,
     /// Resolved by the creditor letting the debtor off.
     Released,
+    /// The horizon passed and the work can no longer be done.
+    Lapsed,
+    /// The debtor says the work will not be done.
+    Refused,
     /// The antecedent ended without being satisfied — never became owed.
     Expired,
 }
@@ -50,6 +54,8 @@ impl State {
             State::Satisfied => "satisfied",
             State::Cancelled => "cancelled",
             State::Released => "released",
+            State::Lapsed => "lapsed",
+            State::Refused => "refused",
             State::Expired => "expired",
         }
     }
@@ -59,7 +65,12 @@ impl State {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            State::Satisfied | State::Cancelled | State::Released | State::Expired
+            State::Satisfied
+                | State::Cancelled
+                | State::Released
+                | State::Lapsed
+                | State::Refused
+                | State::Expired
         )
     }
 
@@ -529,10 +540,14 @@ impl<'a> Solver<'a, '_> {
                     Some(CorrectAs::Satisfied) => State::Satisfied,
                     Some(CorrectAs::Cancelled) => State::Cancelled,
                     Some(CorrectAs::Released) => State::Released,
+                    Some(CorrectAs::Lapsed) => State::Lapsed,
+                    Some(CorrectAs::Refused) => State::Refused,
                     None => match event.resolution() {
                         Some(Resolution::Satisfied { .. }) => State::Satisfied,
                         Some(Resolution::Cancelled { .. }) => State::Cancelled,
                         Some(Resolution::Released { .. }) => State::Released,
+                        Some(Resolution::Lapsed { .. }) => State::Lapsed,
+                        Some(Resolution::Refused { .. }) => State::Refused,
                         // Only `resolve` events land in `resolutions`, so this is
                         // unreachable; leaving it open is the honest fallback.
                         None => State::Detached,
@@ -583,7 +598,11 @@ impl<'a> Solver<'a, '_> {
                         // The antecedent ended without satisfying, so this never
                         // became owed. Note this propagates: a promise on an expired
                         // antecedent is itself expired, transitively down the chain.
-                        State::Cancelled | State::Released | State::Expired => State::Expired,
+                        State::Cancelled
+                        | State::Released
+                        | State::Lapsed
+                        | State::Refused
+                        | State::Expired => State::Expired,
                         // Still open — including `overdue`, which is late but *not*
                         // terminal. A dependent does not expire because its
                         // antecedent is running late; it expires only when the
@@ -865,11 +884,22 @@ mod tests {
     // ---- terminal states -------------------------------------------------
 
     #[test]
-    fn satisfied_cancelled_and_released_are_terminal() {
+    fn resolutions_are_terminal() {
         for (event, expected) in [
             (satisfied("pnk_a"), State::Satisfied),
             (cancelled("pnk_a"), State::Cancelled),
             (released("pnk_a"), State::Released),
+            (
+                Event::new(BEFORE, EventBody::lapsed("pnk_a", "observer", None)),
+                State::Lapsed,
+            ),
+            (
+                Event::new(
+                    BEFORE,
+                    EventBody::refused("pnk_a", "…/debtor", "cannot do it"),
+                ),
+                State::Refused,
+            ),
         ] {
             let log = [promise("pnk_a", None, UNTIL), event];
             let state = state_of(&log, BEFORE, "pnk_a");
@@ -889,6 +919,8 @@ mod tests {
             State::Satisfied,
             State::Cancelled,
             State::Released,
+            State::Lapsed,
+            State::Refused,
             State::Expired,
         ] {
             assert!(state.is_terminal(), "{state}");
@@ -903,6 +935,8 @@ mod tests {
         assert_eq!(State::Satisfied.as_str(), "satisfied");
         assert_eq!(State::Cancelled.as_str(), "cancelled");
         assert_eq!(State::Released.as_str(), "released");
+        assert_eq!(State::Lapsed.as_str(), "lapsed");
+        assert_eq!(State::Refused.as_str(), "refused");
         assert_eq!(State::Expired.as_str(), "expired");
     }
 

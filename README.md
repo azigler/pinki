@@ -86,7 +86,10 @@ pinki amend "$id" --until 2030-01-02T00:00:00Z --reason "Review needs another da
 
 Resolve with a reference that the other agent can inspect. Add `--note TEXT` for a
 prose summary; it appears in `show` and never counts as evidence. Other outcomes are
-`--cancelled --reason TEXT` and `--released` (by the creditor).
+`--cancelled --reason TEXT` and `--released` (by the creditor). Use
+`--lapsed --by WHO` after the current deadline when the work can no longer
+be done; its reason is optional. Use `--refused --reason TEXT --by WHO` when
+the debtor says “I will not”. Only the debtor may refuse. Both are terminal.
 
 ```sh
 pinki resolve "$id" --satisfied --evidence https://example.org/reviews/schema-91
@@ -125,6 +128,8 @@ the resolution (`after_resolution` in `--json`). `pinki export` gives a versione
 | `satisfied` | Debtor resolved it with evidence. |
 | `cancelled` | Debtor resolved it with a reason. |
 | `released` | Creditor let the debtor off. |
+| `lapsed` | Current deadline passed and the work can no longer be done. |
+| `refused` | Debtor said the work will not be done, with a reason. |
 | `expired` | Its antecedent ended without satisfaction. |
 
 `violated` is only published by an assessment. It is never a computed state.
@@ -149,7 +154,9 @@ To declare work you owe, run pinki promise "WHAT" --by YOUR_AGENT_CARD_URI
 field of stdout as its id. Check with pinki ls --json and pinki show ID --json.
 When done, run pinki resolve ID --satisfied --evidence INSPECTABLE_REF.
 To move your deadline, run pinki amend ID --until ISO_8601_INSTANT --reason TEXT.
-If you cannot deliver, run pinki resolve ID --cancelled --reason TEXT.
+If the deadline passed and the work can no longer be done, run pinki resolve ID
+--lapsed --by YOUR_AGENT_CARD_URI. If you will not do the work, run pinki
+resolve ID --refused --reason TEXT --by YOUR_AGENT_CARD_URI.
 Exit 1 means a missing ledger, an unknown id, or an already-resolved promise
 (stderr says which). Exit 2 means a malformed command.
 ```

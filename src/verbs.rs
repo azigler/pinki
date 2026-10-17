@@ -404,7 +404,7 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
     let now = now_to_the_second();
     let (event_ts, source) = event_timestamp(args.ts.as_deref(), now)?;
 
-    let (default_by, existing) = {
+    let default_by = {
         let folded = fold(&events, now);
         let view = folded
             .get(&args.id)
@@ -413,26 +413,49 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
             // §4's "Issued by" column: the debtor satisfies or cancels, the creditor
             // releases. An explicit --by that disagrees is recorded, never rejected —
             // pinki "records who claimed what".
-            Outcome::Satisfied(_) | Outcome::Cancelled(_) => view.record.by.clone(),
+            Outcome::Satisfied(_) | Outcome::Cancelled(_) | Outcome::Refused(_) => {
+                view.record.by.clone()
+            }
             Outcome::Released(_) => view.record.to.clone(),
+            Outcome::Lapsed(_) => String::new(),
         };
-        let existing = view.resolution.map(|event| {
+        if let Some(event) = view.resolution {
             let kind = event
                 .resolution()
                 .map(Resolution::as_str)
                 .unwrap_or("resolved");
-            (kind.to_string(), event.ts.clone())
-        });
-        (default_by, existing)
+            return Err(Fail::Op(format!(
+                "`{}` is already resolved: {kind} at {}. The first resolve wins (§4), so nothing \
+                 was appended — `pinki show {}` for the record",
+                args.id, event.ts, args.id
+            )));
+        }
+        if matches!(outcome, Outcome::Lapsed(_)) {
+            let until = Timestamp::from_str(view.until()).map_err(|e| {
+                Fail::Op(format!(
+                    "cannot lapse `{}`: current horizon `{}` cannot be evaluated as an instant ({e}). Nothing was appended",
+                    args.id,
+                    view.until()
+                ))
+            })?;
+            if now <= until {
+                return Err(Fail::Op(format!(
+                    "`{}` may not lapse before its current horizon {} (§4): the clock has not run out. Nothing was appended",
+                    args.id, view.until()
+                )));
+            }
+        }
+        if matches!(outcome, Outcome::Refused(_)) {
+            let given = args.by.as_deref().expect("validated --by");
+            if given.trim() != view.record.by {
+                return Err(Fail::Op(format!(
+                    "`{given}` may not refuse `{}`: only debtor `{}` may say the work will not be done (§4). Nothing was appended",
+                    args.id, view.record.by
+                )));
+            }
+        }
+        default_by
     };
-
-    if let Some((kind, ts)) = existing {
-        return Err(Fail::Op(format!(
-            "`{}` is already resolved: {kind} at {ts}. The first resolve wins (§4), so nothing \
-             was appended — `pinki show {}` for the record",
-            args.id, args.id
-        )));
-    }
 
     let by = match args.by {
         Some(by) => non_blank(&by, "`by`")?,
@@ -443,6 +466,8 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
         Outcome::Satisfied(evidence) => EventBody::satisfied(&args.id, by, evidence),
         Outcome::Cancelled(reason) => EventBody::cancelled(&args.id, by, reason),
         Outcome::Released(reason) => EventBody::released(&args.id, by, reason),
+        Outcome::Lapsed(reason) => EventBody::lapsed(&args.id, by, reason),
+        Outcome::Refused(reason) => EventBody::refused(&args.id, by, reason),
     };
 
     let mut body = body;
@@ -457,12 +482,14 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
     Ok(())
 }
 
-/// The three outcomes of §4's resolve table, after validation.
+/// The outcomes of §4's resolve table, after validation.
 #[derive(Debug)]
 enum Outcome {
     Satisfied(Vec<String>),
     Cancelled(String),
     Released(Option<String>),
+    Lapsed(Option<String>),
+    Refused(String),
 }
 
 /// §4's requirements, checked in pinki's own words rather than clap's.
@@ -524,6 +551,33 @@ fn resolution_from(args: &ResolveArgs) -> Result<Outcome, Fail> {
         return Ok(Outcome::Cancelled(non_blank(reason, "--reason")?));
     }
 
+    if args.lapsed || args.refused {
+        if !args.evidence.is_empty() {
+            return Err(Fail::Usage(format!(
+                "--evidence is not accepted with --{} (§4): no work was completed. Nothing was appended",
+                if args.lapsed { "lapsed" } else { "refused" }
+            )));
+        }
+        if args.by.is_none() {
+            return Err(Fail::Usage(format!(
+                "--{} requires --by WHO (§4): the terminal claim must name its author. Nothing was appended",
+                if args.lapsed { "lapsed" } else { "refused" }
+            )));
+        }
+        if args.refused {
+            let reason = args.reason.as_deref().ok_or_else(|| Fail::Usage(
+                "--refused requires --reason TEXT (§4): the debtor must say why. Nothing was appended".into()
+            ))?;
+            return Ok(Outcome::Refused(non_blank(reason, "--reason")?));
+        }
+        return Ok(Outcome::Lapsed(
+            args.reason
+                .as_deref()
+                .map(|r| non_blank(r, "--reason"))
+                .transpose()?,
+        ));
+    }
+
     // --released. Clap's ArgGroup makes this the only remaining case.
     if !args.evidence.is_empty() {
         return Err(Fail::Usage(
@@ -549,6 +603,8 @@ fn correct(args: CorrectArgs) -> Result<(), Fail> {
         "satisfied" => CorrectAs::Satisfied,
         "cancelled" => CorrectAs::Cancelled,
         "released" => CorrectAs::Released,
+        "lapsed" => CorrectAs::Lapsed,
+        "refused" => CorrectAs::Refused,
         _ => unreachable!("clap validates --as"),
     };
     let evidence = if outcome == CorrectAs::Satisfied {
@@ -920,6 +976,7 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
             Scope::Open => view.state.is_open(),
             Scope::Overdue => view.state == State::Overdue,
             Scope::All => true,
+            Scope::State(ref state) => view.state.as_str() == state,
         })
         // Orthogonal to the state filter, and exact: `by` and `to` are card
         // identities, and pinki resolves nothing (§6).
@@ -1137,6 +1194,26 @@ fn detail<'a>(view: &'a PromiseView<'a>) -> Detail<'a> {
                 by: resolution.by(),
                 evidence: None,
                 reason: reason.as_deref(),
+                note,
+                meta: event.meta(),
+            },
+            Resolution::Lapsed { reason, .. } => ResolutionJson {
+                kind: resolution.as_str(),
+                ts: &event.ts,
+                source: event.source.as_deref(),
+                by: resolution.by(),
+                evidence: None,
+                reason: reason.as_deref(),
+                note,
+                meta: event.meta(),
+            },
+            Resolution::Refused { reason, .. } => ResolutionJson {
+                kind: resolution.as_str(),
+                ts: &event.ts,
+                source: event.source.as_deref(),
+                by: resolution.by(),
+                evidence: None,
+                reason: Some(reason.as_str()),
                 note,
                 meta: event.meta(),
             },
@@ -1773,6 +1850,8 @@ mod tests {
             satisfied: true,
             cancelled: false,
             released: false,
+            lapsed: false,
+            refused: false,
             evidence: Vec::new(),
             reason: None,
             note: None,
@@ -1792,6 +1871,8 @@ mod tests {
             satisfied: true,
             cancelled: false,
             released: false,
+            lapsed: false,
+            refused: false,
             evidence: vec!["   ".into()],
             reason: None,
             note: None,
@@ -1809,6 +1890,8 @@ mod tests {
             satisfied: false,
             cancelled: true,
             released: false,
+            lapsed: false,
+            refused: false,
             evidence: Vec::new(),
             reason: None,
             note: None,
@@ -1833,6 +1916,8 @@ mod tests {
             satisfied: false,
             cancelled: false,
             released: true,
+            lapsed: false,
+            refused: false,
             evidence: Vec::new(),
             reason: None,
             note: None,

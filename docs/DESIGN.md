@@ -272,6 +272,8 @@ Given the record and the log, any two implementations produce the same answer.
 | `satisfied` | Resolved by the debtor, with evidence |
 | `cancelled` | Resolved by the debtor, with a reason |
 | `released` | Resolved by the creditor letting the debtor off |
+| `lapsed` | Resolved after the current horizon passed; the work can no longer be done |
+| `refused` | Resolved by the debtor saying the work will not be done |
 | `expired` | The antecedent ended without being satisfied — never became owed |
 
 ### Asserted states — speech acts, attributed to whoever said them
@@ -406,13 +408,29 @@ left to move. And "latest" means last in the log, not the largest `ts` — the f
 compares event timestamps, because a ledger whose lines are out of order is not one
 whose clock can be trusted to sort them.
 
-**`resolve`** — ends one. Three outcomes:
+**`resolve`** — ends one. Five outcomes:
 
 | `as` | Issued by | Requires |
 |---|---|---|
 | `satisfied` | debtor | `evidence`: one or more **references**. **Non-optional.** |
 | `cancelled` | debtor | `reason`: non-empty text. |
 | `released` | creditor | nothing. Reason encouraged. |
+| `lapsed` | any party, named by `--by` | Current amended `until` has passed at the fold's `now`. Reason optional. |
+| `refused` | debtor, named by `--by` | Non-empty `reason`. |
+
+`lapsed` means the deadline passed and the work can no longer be done. The CLI
+refuses it at or before the current horizon, using the same `now` as the fold.
+It checks the latest amend, not the declaration's old deadline. `refused`
+records the debtor saying “I will not”; another party may assess that act but
+may not issue it. These checks govern CLI writes. The fold still attributes
+and reads a hand-written event, as it does for other outcomes.
+
+`cancelled` was the wrong mapping for both cases. It asserts that the
+creditor withdrew the obligation. A clock that ran out and a debtor who
+refused are different claims with different authors. This adds no event type
+or verb: it adds two words to the existing `resolve` event and `correct`
+vocabulary. It fits the one-event, one-verb bloat budget while letting the
+ledger state the measured cases truthfully.
 
 A **reference** is anything that points outward at a thing another party could go and
 look at: a URL, a file path, a commit SHA, an A2A `Artifact.artifact_id`. pinki does
@@ -434,7 +452,8 @@ authority pinki does not have and should not pretend to — see §6.
 **`correct`** — relabels the *outcome* of the winning `resolve`. The first resolve
 still wins as the resolution record: its line, author, timestamp and evidence or
 reason remain intact. A later `resolve` still has no effect. A `correct` line names
-the same promise, a new `as` (`satisfied`, `cancelled` or `released`), the winning
+the same promise, a new `as` (`satisfied`, `cancelled`, `released`, `lapsed` or
+`refused`), the winning
 resolver's `by`, a required non-blank `reason`, and evidence when `as` is
 `satisfied`. Each correction is retained. The latest authorized correction in **log
 order** sets computed state, including the state of dependent promises. The fold

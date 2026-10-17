@@ -13,6 +13,11 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- `resolve --lapsed --by WHO` records a deadline that passed when the work can
+  no longer be done; `resolve --refused --reason TEXT --by WHO` records the
+  debtor's refusal. Both are terminal states in reads, export, and A2A task.
+  `correct --as` accepts both outcomes; old ledger exports keep their bytes.
+
 - `resolve --note TEXT` stores a prose note on the resolve event. `show` displays
   it in text and JSON. It never counts as evidence for satisfaction (#8).
 - `a2a task` adds the `show --json` read model under its existing extension key:

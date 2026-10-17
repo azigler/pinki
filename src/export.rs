@@ -170,6 +170,10 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
                 states.insert(state.as_str(), 0);
             }
             for promise in &promises {
+                // Keep v1 output for ledgers without the new vocabulary byte-identical.
+                if matches!(promise.state, "lapsed" | "refused") {
+                    states.entry(promise.state).or_insert(0);
+                }
                 *states
                     .get_mut(promise.state)
                     .expect("every folded state is named") += 1;
@@ -227,6 +231,8 @@ fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
                 Resolution::Satisfied { evidence, .. } => (Some(evidence.as_slice()), None),
                 Resolution::Cancelled { reason, .. } => (None, Some(reason.as_str())),
                 Resolution::Released { reason, .. } => (None, reason.as_deref()),
+                Resolution::Lapsed { reason, .. } => (None, reason.as_deref()),
+                Resolution::Refused { reason, .. } => (None, Some(reason.as_str())),
             };
             ResolutionView {
                 kind: kind.as_str(),
