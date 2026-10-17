@@ -1,4 +1,4 @@
-//! The eight verbs — DESIGN.md §5.
+//! The nine verbs — DESIGN.md §5.
 //!
 //! Every verb is the same three moves: read the ledger, fold it into states at
 //! `now`, and then either print or append exactly one event. Nothing here holds
@@ -33,9 +33,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::a2a;
 use crate::cli::{
-    A2aCommand, AmendArgs, AssessArgs, Command, LsArgs, PromiseArgs, ResolveArgs, Scope, ShowArgs,
+    A2aCommand, AmendArgs, AssessArgs, Command, CorrectArgs, LsArgs, PromiseArgs, ResolveArgs,
+    Scope, ShowArgs,
 };
-use crate::event::{Event, EventBody, Resolution, RETRACTED, VIOLATED};
+use crate::event::{CorrectAs, Event, EventBody, Resolution, RETRACTED, VIOLATED};
 use crate::export;
 use crate::id;
 use crate::ledger;
@@ -86,6 +87,7 @@ pub fn run(command: Command) -> Result<(), Fail> {
         Command::Promise(args) => promise(args),
         Command::Amend(args) => amend(args),
         Command::Resolve(args) => resolve(args),
+        Command::Correct(args) => correct(args),
         Command::Assess(args) => assess(args),
         Command::Ls(args) => ls(args),
         Command::Show(args) => show(args),
@@ -528,6 +530,87 @@ fn resolution_from(args: &ResolveArgs) -> Result<Outcome, Fail> {
     Ok(Outcome::Released(reason))
 }
 
+// ---------------------------------------------------------------- correct
+
+fn correct(args: CorrectArgs) -> Result<(), Fail> {
+    let by = non_blank(&args.by, "--by")?;
+    let reason = non_blank(&args.reason, "--reason")?;
+    let meta = meta_flag(args.meta.as_deref())?;
+    let outcome = match args.outcome.as_str() {
+        "satisfied" => CorrectAs::Satisfied,
+        "cancelled" => CorrectAs::Cancelled,
+        "released" => CorrectAs::Released,
+        _ => unreachable!("clap validates --as"),
+    };
+    let evidence = if outcome == CorrectAs::Satisfied {
+        if args.evidence.is_empty() {
+            return Err(Fail::Usage(
+                "--as satisfied requires at least one --evidence REF (§4): a claim that work was done must point outward. Nothing was appended".into(),
+            ));
+        }
+        let mut references = Vec::with_capacity(args.evidence.len());
+        for reference in &args.evidence {
+            let reference = reference.trim();
+            if reference.is_empty() {
+                return Err(Fail::Usage(
+                    "an --evidence value is empty: evidence must point at something another party could inspect (§4). Nothing was appended".into(),
+                ));
+            }
+            references.push(reference.to_string());
+        }
+        Some(references)
+    } else {
+        if !args.evidence.is_empty() {
+            return Err(Fail::Usage(format!(
+                "--evidence is not accepted with --as {} (§4): only satisfaction claims carry evidence. Nothing was appended",
+                outcome.as_str()
+            )));
+        }
+        None
+    };
+
+    let mut events = read_ledger()?;
+    let now = now_to_the_second();
+    let (event_ts, source) = event_timestamp(args.ts.as_deref(), now)?;
+    {
+        let folded = fold(&events, now);
+        let view = folded
+            .get(&args.id)
+            .ok_or_else(|| unknown_id(&args.id, "correct"))?;
+        let winner = view.resolution.and_then(Event::resolution).ok_or_else(|| {
+            Fail::Op(format!(
+                "`{}` is unresolved: `pinki correct` requires a winning resolve (§4). Nothing was appended",
+                args.id
+            ))
+        })?;
+        if by != winner.by() {
+            return Err(Fail::Op(format!(
+                "`{by}` may not correct `{}`: only `{}` (the winning resolve's `by`) may relabel its outcome (§4, same-author rule). Nothing was appended",
+                args.id,
+                winner.by()
+            )));
+        }
+        if view.state.as_str() == outcome.as_str() {
+            println!(
+                "`{}` is already {}: correction is a no-op (§4); nothing was appended",
+                args.id,
+                outcome.as_str()
+            );
+            return Ok(());
+        }
+    }
+
+    let event = Event::new(
+        event_ts,
+        EventBody::correction(&args.id, outcome, by, reason, evidence).with_meta(meta),
+    )
+    .with_source(source);
+    append(&event)?;
+    events.push(event);
+    report(&events, now, &args.id);
+    Ok(())
+}
+
 // ---------------------------------------------------------------- assess
 
 fn assess(args: AssessArgs) -> Result<(), Fail> {
@@ -927,6 +1010,8 @@ struct Detail<'a> {
     /// `null` until somebody resolves it — the field is always present so a consumer
     /// can test it rather than probe for it.
     resolution: Option<ResolutionJson<'a>>,
+    /// Corrections in log order. The original resolution remains above.
+    corrections: Vec<CorrectionJson<'a>>,
     /// Every assessment naming this promise, in log order. Two contradicting ones both
     /// appear: §3, "that is not a bug in pinki; it is the actual state of the world."
     assessments: Vec<AssessmentJson<'a>>,
@@ -960,6 +1045,21 @@ struct ResolutionJson<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
     /// The resolve event's own provenance, handed back exactly as the log holds it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<&'a Meta>,
+}
+
+#[derive(Serialize)]
+struct CorrectionJson<'a> {
+    #[serde(rename = "as")]
+    kind: &'a str,
+    ts: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
+    by: &'a str,
+    reason: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<&'a Meta>,
 }
@@ -1064,6 +1164,29 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         })
         .collect();
 
+    let corrections: Vec<CorrectionJson> = view
+        .corrections
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::Correct {
+                outcome,
+                by,
+                reason,
+                evidence,
+                ..
+            } => Some(CorrectionJson {
+                kind: outcome.as_str(),
+                ts: &event.ts,
+                source: event.source.as_deref(),
+                by,
+                reason,
+                evidence: evidence.as_deref(),
+                meta: event.meta(),
+            }),
+            _ => None,
+        })
+        .collect();
+
     let assessments: Vec<AssessmentJson> = view
         .assessments
         .iter()
@@ -1110,6 +1233,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             state: view.state.as_str(),
             horizons,
             resolution,
+            corrections,
             assessments,
         };
         println!("{}", encode(&detail)?);
@@ -1181,6 +1305,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                     ""
                 }
             );
+            if let Some(source) = resolution.source {
+                println!("    source     {source}");
+            }
             if let Some(evidence) = resolution.evidence {
                 for reference in evidence {
                     println!("    evidence   {reference}");
@@ -1194,6 +1321,35 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             }
         }
         None => println!("  resolution   (unresolved)"),
+    }
+
+    if !corrections.is_empty() {
+        println!("  corrections");
+        for correction in &corrections {
+            println!(
+                "    {} at {} by {}{}",
+                correction.kind,
+                correction.ts,
+                correction.by,
+                if correction.source == Some("supplied") {
+                    " (supplied)"
+                } else {
+                    ""
+                }
+            );
+            if let Some(source) = correction.source {
+                println!("      source   {source}");
+            }
+            println!("      reason   {}", correction.reason);
+            if let Some(evidence) = correction.evidence {
+                for reference in evidence {
+                    println!("      evidence {reference}");
+                }
+            }
+            if let Some(meta) = correction.meta {
+                println!("      meta     {}", one_line(meta));
+            }
+        }
     }
 
     if assessments.is_empty() {

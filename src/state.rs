@@ -18,7 +18,7 @@ use std::str::FromStr;
 
 use jiff::Timestamp;
 
-use crate::event::{Event, EventBody, Resolution};
+use crate::event::{CorrectAs, Event, EventBody, Resolution};
 use crate::record::{Meta, Promise};
 
 /// A computed state. §3's first table, and nothing else.
@@ -117,6 +117,9 @@ pub struct PromiseView<'a> {
     /// The `resolve` event that ended it, if any. The **first** one in the log —
     /// see [`fold`] on why later ones are ignored rather than rejected.
     pub resolution: Option<&'a Event>,
+    /// Every correction line for this promise, in log order. The original resolution
+    /// remains separate, so readers can display the complete history.
+    pub corrections: Vec<&'a Event>,
     /// Every `assess` event naming this promise, in log order. Never terminal, never
     /// consulted by the state computation — §4: "an assessed promise stays exactly as
     /// open as it was." Two contradicting assessments both appear here, which is §3's
@@ -272,7 +275,7 @@ impl<'a> Fold<'a> {
 /// `now` is injected, never read from the clock: §6 — pinki "has no clock of its own
 /// — it reads `until` and compares it to `now` when you ask."
 ///
-/// Three tolerances, all of them because §4 says two ledgers may be concatenated into
+/// Four tolerances, all of them because §4 says two ledgers may be concatenated into
 /// a joined view and §7 makes that join the whole point of the format:
 ///
 /// - a **second `promise` event** for an id already declared is ignored (the first
@@ -282,12 +285,14 @@ impl<'a> Fold<'a> {
 ///   stands) — a joined or hand-edited ledger can legitimately hold two, and picking
 ///   the first is the only choice that does not depend on which side of a join you
 ///   were standing on;
-/// - a **dangling** `amend`, `resolve` or `assess`, naming an id with no `promise`
+/// - a **correction** affects state only after the winning resolve and only when its
+///   `by` matches that resolver; every correction line remains available for history;
+/// - a **dangling** `amend`, `resolve`, `correct` or `assess`, naming an id with no `promise`
 ///   event, is ignored rather than treated as an error. A joined ledger routinely
 ///   carries half a conversation.
 ///
-/// `amend` is the one event where the **last** one wins rather than the first: a
-/// horizon is meant to move, and the newest is the current one. "Newest" is log order,
+/// `amend` and authorized `correct` take the **last** line rather than the first: a
+/// horizon or outcome is meant to move, and the newest is the current one. "Newest" is log order,
 /// not `ts` order — this module never compares event timestamps, and a ledger whose
 /// lines are out of order is not one whose clock we can trust to sort them.
 pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
@@ -296,6 +301,8 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
     let mut declared_at: HashMap<&'a str, &'a Event> = HashMap::new();
     let mut amendments: HashMap<&'a str, Vec<Horizon<'a>>> = HashMap::new();
     let mut resolutions: HashMap<&'a str, &'a Event> = HashMap::new();
+    let mut corrections: HashMap<&'a str, Vec<&'a Event>> = HashMap::new();
+    let mut effective: HashMap<&'a str, CorrectAs> = HashMap::new();
     let mut assessments: HashMap<&'a str, Vec<Assessed<'a>>> = HashMap::new();
 
     for event in events {
@@ -337,6 +344,23 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
             EventBody::Resolve { promise, .. } => {
                 // First resolve wins.
                 resolutions.entry(promise.as_str()).or_insert(event);
+            }
+            EventBody::Correct {
+                promise,
+                by,
+                outcome,
+                ..
+            } => {
+                corrections.entry(promise.as_str()).or_default().push(event);
+                // The fold enforces the same-author and backward-only rule even for
+                // joined or hand-written ledgers. Rejected lines stay visible.
+                if resolutions
+                    .get(promise.as_str())
+                    .and_then(|winner| winner.resolution())
+                    .is_some_and(|winner| winner.by() == by)
+                {
+                    effective.insert(promise.as_str(), *outcome);
+                }
             }
             EventBody::Assess {
                 promise,
@@ -389,6 +413,7 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
         records: &records,
         current: &current,
         resolutions: &resolutions,
+        effective: &effective,
         memo: HashMap::new(),
     };
     for id in &order {
@@ -429,6 +454,7 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                 },
                 horizons,
                 resolution: resolutions.get(id).copied(),
+                corrections: corrections.get(id).cloned().unwrap_or_default(),
                 assessments: assessments.get(id).cloned().unwrap_or_default(),
             };
             (id, view)
@@ -463,6 +489,7 @@ struct Solver<'a, 'm> {
     /// moved the deadline and the record's own `until` still stands.
     current: &'m HashMap<&'a str, &'a str>,
     resolutions: &'m HashMap<&'a str, &'a Event>,
+    effective: &'m HashMap<&'a str, CorrectAs>,
     memo: HashMap<&'a str, Memo>,
 }
 
@@ -498,13 +525,18 @@ impl<'a> Solver<'a, '_> {
 
             // Rule 1: a resolution ends the promise, whatever the antecedent says.
             if let Some(event) = self.resolutions.get(current) {
-                let state = match event.resolution() {
-                    Some(Resolution::Satisfied { .. }) => State::Satisfied,
-                    Some(Resolution::Cancelled { .. }) => State::Cancelled,
-                    Some(Resolution::Released { .. }) => State::Released,
-                    // Only `resolve` events land in `resolutions`, so this is
-                    // unreachable; leaving it open is the honest fallback.
-                    None => State::Detached,
+                let state = match self.effective.get(current) {
+                    Some(CorrectAs::Satisfied) => State::Satisfied,
+                    Some(CorrectAs::Cancelled) => State::Cancelled,
+                    Some(CorrectAs::Released) => State::Released,
+                    None => match event.resolution() {
+                        Some(Resolution::Satisfied { .. }) => State::Satisfied,
+                        Some(Resolution::Cancelled { .. }) => State::Cancelled,
+                        Some(Resolution::Released { .. }) => State::Released,
+                        // Only `resolve` events land in `resolutions`, so this is
+                        // unreachable; leaving it open is the honest fallback.
+                        None => State::Detached,
+                    },
                 };
                 self.memo.insert(current, Memo::Done(state));
                 stack.pop();

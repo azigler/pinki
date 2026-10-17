@@ -39,6 +39,8 @@ struct ExportPromise<'a> {
     amendments: Vec<Amendment<'a>>,
     state: &'static str,
     resolution: Option<ResolutionView<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    corrections: Vec<Correction<'a>>,
     assessments: Vec<Assessment<'a>>,
     created_at: &'a str,
 }
@@ -64,6 +66,21 @@ struct ResolutionView<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
     at: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<&'a Meta>,
+}
+
+#[derive(Serialize)]
+struct Correction<'a> {
+    #[serde(rename = "as")]
+    kind: &'a str,
+    by: &'a str,
+    reason: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<&'a [String]>,
+    ts: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<&'a Meta>,
 }
@@ -248,12 +265,36 @@ fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
         .collect();
     assessments.sort_by_key(|assessment| time_key(assessment.at));
 
+    let corrections = view
+        .corrections
+        .iter()
+        .filter_map(|event| match &event.body {
+            EventBody::Correct {
+                outcome,
+                by,
+                reason,
+                evidence,
+                ..
+            } => Some(Correction {
+                kind: outcome.as_str(),
+                by,
+                reason,
+                evidence: evidence.as_deref(),
+                ts: &event.ts,
+                source: event.source.as_deref(),
+                meta: event.meta(),
+            }),
+            _ => None,
+        })
+        .collect();
+
     ExportPromise {
         record: view.current_record(),
         original_until: view.record.until.as_str(),
         amendments,
         state: view.state.as_str(),
         resolution,
+        corrections,
         assessments,
         created_at: view.horizons[0].ts,
     }

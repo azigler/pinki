@@ -328,11 +328,11 @@ late judgment matters is the reader's call.
 
 ## 4. The log
 
-Append-only JSONL. Four event types. State is a fold over the log.
+Append-only JSONL. Five event types. State is a fold over the log.
 
 Every new CLI line has a `source` beside its `ts`: `cli` means pinki stamped the
 current second at append; `supplied` means the caller passed `--ts ISO` (or `ts` in
-a stdin promise record). All four write verbs accept `--ts`. A supplied timestamp
+a stdin promise record). All five write verbs accept `--ts`. A supplied timestamp
 may be in the past. The CLI refuses one more than 300 seconds beyond its current
 clock, citing this rule. It normalizes accepted instants to UTC seconds so an
 assessment's timestamp and observer remain a unique reference (§7). This label
@@ -341,7 +341,8 @@ describes the write path, not proof that an event happened then (§8.5).
 Older lines without `source` keep it **absent** in the read model. Guessing `cli`
 would mislabel history written by another tool. `show --json` and `ls --json` expose
 the declaration's `ts` and `source`; `show --json` also exposes `source` on each
-horizon, resolution, and assessment. Text `show` labels only supplied timestamps.
+horizon, resolution, correction, and assessment. Text `show` labels supplied
+timestamps and prints known sources on resolution and correction history.
 The fold still uses log order, not event timestamps. So the CLI does not check that a
 supplied resolve, amend or assessment timestamp falls after its declaration: an import
 may carry clocks that disagree, and order comes from the log, never from `ts`. A
@@ -419,6 +420,28 @@ Note what pinki does *not* do: it does not verify that `by` on the resolve event
 matches `by` on the promise. It records who claimed what. Enforcement needs
 authority pinki does not have and should not pretend to — see §6.
 
+**`correct`** — relabels the *outcome* of the winning `resolve`. The first resolve
+still wins as the resolution record: its line, author, timestamp and evidence or
+reason remain intact. A later `resolve` still has no effect. A `correct` line names
+the same promise, a new `as` (`satisfied`, `cancelled` or `released`), the winning
+resolver's `by`, a required non-blank `reason`, and evidence when `as` is
+`satisfied`. Each correction is retained. The latest authorized correction in **log
+order** sets computed state, including the state of dependent promises. The fold
+ignores corrections before the winning resolve and corrections by another author;
+the lines remain visible in history. The CLI refuses those writes. This is the
+same-author rule as assessment supersede (§3): only the author of the winning
+resolution may correct it. pinki compares the `by` strings; it does not authenticate
+the caller. A correction that repeats the current state is a named no-op and appends
+nothing. `--ts` has the same provenance and 300-second future limit as other writes.
+
+```jsonl
+{"ts":"2026-09-02T10:00:00Z","source":"supplied","type":"correct","promise":"pnk_4f3a91","as":"satisfied","by":"…/reviewer","reason":"migration mislabelled kept work","evidence":["sha:9c1f0e"]}
+```
+
+This spends the bloat budget on **one new verb** for a real mislabelled resolution.
+It changes one outcome and preserves the proof of both claims. A general edit or
+undo verb would have a wider authority surface and make the log harder to read.
+
 **`assess`** — publishes an assessment. Author, state, timestamp, optional note.
 Never terminal: an assessed promise stays exactly as open as it was.
 
@@ -464,8 +487,8 @@ tolerance as skipping a line it could not parse at all — that one stays fatal,
 line at a time. The distinction is "an event I have not heard of" versus "not an
 event."
 
-**`meta` on any of the four.** §1's open door is not only the record's. Amending,
-resolving and assessing carry their own provenance in an adopting system — which
+**`meta` on any of the five.** §1's open door is not only the record's. Amending,
+resolving, correcting and assessing carry their own provenance in an adopting system — which
 component moved this horizon, which resolved it, on whose behalf, citing what — and
 that provenance belongs to the *act*, not to the promise, so it rides the event that
 performed it:
@@ -502,7 +525,7 @@ weaker thing to build on.
 
 ## 5. The CLI
 
-Eight verbs. It should feel like a small issue tracker: push JSON in, pull JSON out,
+Nine verbs. It should feel like a small issue tracker: push JSON in, pull JSON out,
 no daemon, no server, no database.
 
 ```
@@ -516,6 +539,8 @@ pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed l
 pinki resolve pnk_4f3a91 --satisfied --evidence https://example.org/reviews/91
 pinki resolve pnk_4f3a91 --cancelled --reason "upstream schema was withdrawn"
 pinki resolve pnk_4f3a91 --released  --by author
+pinki correct pnk_4f3a91 --as satisfied --evidence sha:9c1f0e \
+      --reason "migration mislabelled kept work" --by reviewer [--ts ISO] [--meta JSON]
 
 pinki assess  pnk_88de10 --violated --observer author --note "nothing shipped"
 pinki assess  pnk_88de10 --retracted --observer author --supersedes 2026-09-02T09:00:00Z \
@@ -567,6 +592,11 @@ the existing version 1 promise shape: readers that use its original fields still
 read it, and a ledger with no supersede or post-resolution assessment exports the
 same bytes as before. The export only reports the fold's relations; it does not
 choose a winning judgment (§3, §7).
+
+Version 1 export also includes `corrections` in log order when present. It omits
+that field when empty, so an old ledger exports byte-identically. The original
+`resolution` remains the first resolve; each correction carries its outcome, author,
+reason, timestamp, source when known, and evidence when supplied.
 
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
 explicit one that disagrees. `--reason` is encouraged, not required: an escalation

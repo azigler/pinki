@@ -1,4 +1,4 @@
-//! The argument surface — DESIGN.md §5's eight verbs, and nothing else.
+//! The argument surface — DESIGN.md §5's nine verbs, and nothing else.
 //!
 //! This module only *describes* the command line. Everything it accepts is then
 //! validated by [`crate::verbs`], because several of §5's rules are ours to state in
@@ -34,6 +34,8 @@ pub enum Command {
     Amend(AmendArgs),
     /// End a promise: satisfied (with evidence), cancelled (with a reason), or released.
     Resolve(ResolveArgs),
+    /// Relabel the outcome of the winning resolution; keep its original log line.
+    Correct(CorrectArgs),
     /// Publish an assessment of a promise. Never terminal — the promise stays as open as it was.
     Assess(AssessArgs),
     /// List promises, filtered by computed state.
@@ -159,6 +161,36 @@ pub struct ResolveArgs {
     pub by: Option<String>,
 
     /// Opaque provenance for this resolve, as a JSON object. Never read.
+    #[arg(long, value_name = "JSON")]
+    pub meta: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CorrectArgs {
+    /// The resolved promise whose outcome was recorded incorrectly.
+    pub id: String,
+
+    /// The corrected outcome.
+    #[arg(long = "as", value_name = "STATE", value_parser = ["satisfied", "cancelled", "released"])]
+    pub outcome: String,
+
+    /// A reference to completed work. Required for --as satisfied; repeatable.
+    #[arg(long, value_name = "REF")]
+    pub evidence: Vec<String>,
+
+    /// Why the earlier outcome was wrong.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
+
+    /// The author of the winning resolution. Only that author may correct it.
+    #[arg(long, value_name = "WHO")]
+    pub by: String,
+
+    /// Event timestamp for importing history; defaults to the current second.
+    #[arg(long, value_name = "ISO")]
+    pub ts: Option<String>,
+
+    /// Opaque provenance for this correction, as a JSON object. Never read.
     #[arg(long, value_name = "JSON")]
     pub meta: Option<String>,
 }
