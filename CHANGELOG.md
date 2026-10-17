@@ -20,6 +20,11 @@ tools can depend on them, not merely read them.
   transitive dependents, with `depth` in its flat JSON output. A promise with
   an unknown antecedent appears as a marked root. These are read views only;
   the ledger format and `export` are unchanged.
+- **`export` includes assessment history for viewers.** Version 1 JSON and JSONL
+  add `supersedes` and `superseded_by` when an assessment names or is replaced by
+  another line, and `after_resolution: true` for an assessment appended after the
+  winning resolution. Absent fields mean no relation or a pre-resolution assessment.
+  Existing export fields and the version number are unchanged.
 - **An observer can supersede its own assessment**
   ([#1](https://github.com/azigler/pinki/issues/1)). `assess` takes
   `--supersedes TS`, the `ts` of an earlier assessment of the same promise, as `show`

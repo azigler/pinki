@@ -541,6 +541,15 @@ time is used as in `ls` and `show`. The local ledger path is omitted so a copied
 ledger produces the same bytes. An assessment remains an attributed speech act, never
 a computed `violated` state.
 
+The version 1 assessment object also carries `supersedes` (the earlier line's `ts`)
+and `superseded_by` (the replacing line's `ts`) when those relations exist. It carries
+`after_resolution: true` when the assessment follows the winning resolution in log
+order (§4). Absent `after_resolution` means false. These are optional additions to
+the existing version 1 promise shape: readers that use its original fields still
+read it, and a ledger with no supersede or post-resolution assessment exports the
+same bytes as before. The export only reports the fold's relations; it does not
+choose a winning judgment (§3, §7).
+
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
 explicit one that disagrees. `--reason` is encouraged, not required: an escalation
 ladder amends on a clock and has one reason for every rung — and, when it carries

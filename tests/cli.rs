@@ -3712,6 +3712,88 @@ fn export_carries_the_full_history_and_provenance_in_both_formats() {
 }
 
 #[test]
+fn export_carries_supersede_and_post_resolution_assessments_in_both_formats() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship the schema", "debtor", "creditor", FUTURE);
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "watchdog"])
+        .expect(0);
+    scratch.rewrite(|n, event| {
+        if n == 1 {
+            event.insert("ts".into(), "2026-01-01T00:00:00Z".into());
+        }
+    });
+    let prior = assessment_ts(&scratch, &id, 0);
+    scratch
+        .run(&["resolve", &id, "--satisfied", "--evidence", "sha:9c1f0e"])
+        .expect(0);
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--retracted",
+            "--observer",
+            "watchdog",
+            "--supersedes",
+            &prior,
+        ])
+        .expect(0);
+    let later = assessment_ts(&scratch, &id, 1);
+    let ledger = scratch.lines();
+
+    let json = scratch.run(&["export", "--now", EXPORT_NOW]);
+    json.expect(0);
+    let document = json.json();
+    assert_eq!(document["version"], 1);
+    let assessments = &document["promises"][0]["assessments"];
+    assert_eq!(assessments.as_array().unwrap().len(), 2);
+    assert_eq!(assessments[0]["state"], "violated");
+    assert_eq!(assessments[0]["superseded_by"], later);
+    assert!(assessments[0].get("supersedes").is_none());
+    assert!(assessments[0].get("after_resolution").is_none());
+    assert_eq!(assessments[1]["state"], "retracted");
+    assert_eq!(assessments[1]["supersedes"], prior);
+    assert!(assessments[1].get("superseded_by").is_none());
+    assert_eq!(assessments[1]["after_resolution"], true);
+
+    let jsonl = scratch.run(&["export", "--format", "jsonl", "--now", EXPORT_NOW]);
+    jsonl.expect(0);
+    let rows: Vec<serde_json::Value> = jsonl
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows, *document["promises"].as_array().unwrap());
+    assert_eq!(scratch.lines(), ledger, "export never appends");
+}
+
+#[test]
+fn export_of_an_old_ledger_keeps_its_exact_v1_bytes() {
+    let scratch = Scratch::new();
+    scratch.touch();
+    fs::write(
+        scratch.ledger(),
+        concat!(
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"promise\",\"id\":\"old\",\"promise\":\"ship\",\"by\":\"a\",\"to\":\"b\",\"until\":\"2099-01-01T00:00:00Z\"}\n",
+            "{\"ts\":\"2026-01-02T00:00:00Z\",\"type\":\"assess\",\"promise\":\"old\",\"state\":\"violated\",\"observer\":\"watchdog\"}\n",
+        ),
+    )
+    .unwrap();
+    let before = scratch.lines();
+
+    let json = scratch.run(&["export", "--now", EXPORT_NOW]);
+    json.expect(0);
+    assert_eq!(
+        json.stdout,
+        concat!(
+            "{\"format\":\"pinki-export\",\"version\":1,\"summary\":{\"total\":1,\"states\":{\"cancelled\":0,\"conditional\":0,\"detached\":1,\"expired\":0,\"overdue\":0,\"released\":0,\"satisfied\":0}},",
+            "\"promises\":[{\"id\":\"old\",\"promise\":\"ship\",\"by\":\"a\",\"to\":\"b\",\"until\":\"2099-01-01T00:00:00Z\",\"original_until\":\"2099-01-01T00:00:00Z\",\"amendments\":[],\"state\":\"detached\",\"resolution\":null,\"assessments\":[{\"state\":\"violated\",\"observer\":\"watchdog\",\"at\":\"2026-01-02T00:00:00Z\"}],\"created_at\":\"2026-01-01T00:00:00Z\"}]}\n",
+        )
+    );
+    assert_eq!(scratch.lines(), before);
+}
+
+#[test]
 fn export_filters_combine_and_since_is_inclusive() {
     let scratch = Scratch::new();
     for (id, by, to, until) in [
