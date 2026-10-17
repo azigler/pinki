@@ -510,9 +510,8 @@ fn a_foreign_id_round_trips_through_every_verb_that_takes_one() {
     assert_eq!(declared.state(), "detached");
 
     // On the line, verbatim — pinki neither rewrites nor decorates it. And the line is
-    // the same *shape* it has always been: §1 gained no `external_id`, so the keys are
-    // exactly the ones a minted id writes, which is why a v0.1.0 reader can still read
-    // this file (see CHANGELOG's Compatibility note).
+    // the same shape as a minted id. §1 gained no `external_id`; the new `source`
+    // field describes the timestamp, not the id.
     let event: serde_json::Value = serde_json::from_str(&scratch.lines()[0]).expect("valid JSON");
     assert_eq!(event["id"], FOREIGN);
     let keys: Vec<&str> = event
@@ -525,7 +524,7 @@ fn a_foreign_id_round_trips_through_every_verb_that_takes_one() {
     // on-disk field order is asserted by `src/record.rs`'s own round-trip test.
     assert_eq!(
         keys,
-        ["by", "id", "promise", "task", "to", "ts", "type", "until"],
+        ["by", "id", "promise", "source", "task", "to", "ts", "type", "until"],
         "a supplied id adds no field and removes none"
     );
 
@@ -3930,6 +3929,161 @@ fn export_refuses_a_malformed_ledger_line_like_ls() {
 
 // ------------------------------------------------------------ what stays uncovered
 //
+#[test]
+fn backdated_stdin_declaration_and_resolve_fold_with_supplied_sources() {
+    let scratch = Scratch::new();
+    let input = format!(
+        r#"{{"id":"import-1","promise":"ship history","by":"debtor","to":"creditor","until":"{PAST}","ts":"2020-01-01T00:00:00Z"}}"#
+    );
+    scratch.feed(&["promise"], &input).expect(0);
+    scratch
+        .run(&[
+            "resolve",
+            "import-1",
+            "--satisfied",
+            "--evidence",
+            "sha:abc",
+            "--ts",
+            "2020-01-02T00:00:00Z",
+        ])
+        .expect(0);
+    let detail = scratch.run(&["show", "import-1", "--json"]).json();
+    assert_eq!(detail["state"], "satisfied");
+    assert_eq!(detail["ts"], "2020-01-01T00:00:00Z");
+    assert_eq!(detail["source"], "supplied");
+    assert_eq!(detail["horizons"][0]["source"], "supplied");
+    assert_eq!(detail["resolution"]["source"], "supplied");
+    let listed = scratch.run(&["ls", "--all", "--json"]).json();
+    assert_eq!(listed[0]["ts"], "2020-01-01T00:00:00Z");
+    assert_eq!(listed[0]["source"], "supplied");
+    assert!(scratch
+        .run(&["show", "import-1"])
+        .stdout
+        .contains("(supplied)"));
+    assert!(scratch
+        .events()
+        .iter()
+        .all(|event| event["source"] == "supplied"));
+}
+
+#[test]
+fn ts_flag_also_works_with_a_stdin_record_but_refuses_two_timestamps() {
+    let scratch = Scratch::new();
+    let record = format!(
+        r#"{{"id":"import-flag","promise":"old work","by":"debtor","to":"creditor","until":"{FUTURE}"}}"#
+    );
+    scratch.feed(&["promise", "--ts", PAST], &record).expect(0);
+    assert_eq!(scratch.events()[0]["source"], "supplied");
+    let duplicate = format!(
+        r#"{{"promise":"again","by":"debtor","to":"creditor","until":"{FUTURE}","ts":"{PAST}"}}"#
+    );
+    let run = scratch.feed(&["promise", "--ts", PAST], &duplicate);
+    run.expect(2);
+    assert!(run.stderr.contains("both supply the event timestamp"));
+    assert_eq!(scratch.lines().len(), 1);
+}
+
+#[test]
+fn cli_stamped_resolve_reads_cli_and_old_rows_keep_source_absent() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("old promise", "debtor", "creditor", FUTURE);
+    scratch.rewrite(|_, event| {
+        event.remove("source");
+    });
+    let before = scratch.run(&["show", &id, "--json"]).json();
+    assert!(before.get("source").is_none());
+    assert!(before["horizons"][0].get("source").is_none());
+    scratch
+        .run(&["resolve", &id, "--satisfied", "--evidence", "sha:abc"])
+        .expect(0);
+    let detail = scratch.run(&["show", &id, "--json"]).json();
+    assert!(detail.get("source").is_none());
+    assert_eq!(detail["resolution"]["source"], "cli");
+    assert!(!scratch.run(&["show", &id]).stdout.contains("(supplied)"));
+}
+
+#[test]
+fn supplied_future_timestamp_is_refused_without_an_append() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&[
+        "promise",
+        "future history",
+        "--by",
+        "debtor",
+        "--to",
+        "creditor",
+        "--until",
+        FUTURE,
+        "--ts",
+        FUTURE,
+    ]);
+    run.expect(2);
+    assert!(
+        run.stderr.contains("300 seconds of clock skew (§4"),
+        "{}",
+        run.stderr
+    );
+    assert!(scratch.lines().is_empty());
+}
+
+#[test]
+fn supplied_assessment_cannot_duplicate_an_observers_second() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("judge this", "debtor", "creditor", FUTURE);
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--violated",
+            "--observer",
+            "watchdog",
+            "--ts",
+            "2020-01-01T00:00:00Z",
+        ])
+        .expect(0);
+    let duplicate = scratch.run(&[
+        "assess",
+        &id,
+        "--violated",
+        "--observer",
+        "watchdog",
+        "--ts",
+        "2019-12-31T16:00:00-08:00",
+    ]);
+    duplicate.expect(1);
+    assert!(
+        duplicate.stderr.contains("already assessed"),
+        "{}",
+        duplicate.stderr
+    );
+    assert_eq!(scratch.lines().len(), 2);
+    let detail = scratch.run(&["show", &id, "--json"]).json();
+    assert_eq!(detail["assessments"][0]["source"], "supplied");
+}
+
+#[test]
+fn supplied_amend_and_assess_sources_reach_show() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("move and judge", "debtor", "creditor", FUTURE);
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--ts", PAST])
+        .expect(0);
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--violated",
+            "--observer",
+            "creditor",
+            "--ts",
+            "2020-01-02T00:00:00Z",
+        ])
+        .expect(0);
+    let detail = scratch.run(&["show", &id, "--json"]).json();
+    assert_eq!(detail["horizons"][1]["source"], "supplied");
+    assert_eq!(detail["assessments"][0]["source"], "supplied");
+}
+
 // `cargo llvm-cov --summary-only --show-missing-lines` names eleven source lines that
 // no test executes. Each is listed here with the reason, because an unexplained gap and
 // a deliberate one look identical in a coverage report — and the deliberate ones should

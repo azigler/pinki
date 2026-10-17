@@ -112,6 +112,8 @@ pub fn run(command: Command) -> Result<(), Fail> {
 struct Incoming {
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    ts: Option<String>,
     promise: String,
     by: String,
     to: String,
@@ -134,6 +136,7 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
         // a command that looks complete on the line behaves as it looks.
         Some(text) => Incoming {
             id: args.id,
+            ts: args.ts,
             promise: text,
             by: required_flag(args.by, "--by")?,
             to: required_flag(args.to, "--to")?,
@@ -157,7 +160,18 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
                         .into(),
                 ));
             }
-            read_incoming_from_stdin()?
+            let mut incoming = read_incoming_from_stdin()?;
+            if let Some(ts) = args.ts {
+                if incoming.ts.is_some() {
+                    return Err(Fail::Usage(
+                        "--ts and `ts` in the stdin record both supply the event timestamp; \
+                         choose one. Nothing was appended"
+                            .into(),
+                    ));
+                }
+                incoming.ts = Some(ts);
+            }
+            incoming
         }
     };
 
@@ -189,6 +203,7 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
+    let (event_ts, source) = event_timestamp(incoming.ts.as_deref(), now)?;
 
     let id = match supplied {
         // Being permissive about the *shape* is safe because uniqueness is not
@@ -248,7 +263,8 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
         meta: None,
     };
 
-    let event = Event::new(now.to_string(), EventBody::promise(record).with_meta(meta));
+    let event =
+        Event::new(event_ts, EventBody::promise(record).with_meta(meta)).with_source(source);
     append(&event)?;
     events.push(event);
 
@@ -282,7 +298,7 @@ fn read_incoming_from_stdin() -> Result<Incoming, Fail> {
         Fail::Usage(format!(
             "the record on stdin is not a promise: {e}\n\
              expected an object with `promise`, `by`, `to`, `until`, and optionally `id`, `on`, \
-             `task`, `meta` — no other keys"
+             `task`, `meta`, `ts` — no other keys"
         ))
     })
 }
@@ -316,6 +332,7 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
+    let (event_ts, source) = event_timestamp(args.ts.as_deref(), now)?;
 
     let by = {
         let folded = fold(&events, now);
@@ -356,9 +373,10 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
     };
 
     let event = Event::new(
-        now.to_string(),
+        event_ts,
         EventBody::amend(&args.id, by, until, reason).with_meta(meta),
-    );
+    )
+    .with_source(source);
     append(&event)?;
     events.push(event);
 
@@ -377,6 +395,7 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
+    let (event_ts, source) = event_timestamp(args.ts.as_deref(), now)?;
 
     let (default_by, existing) = {
         let folded = fold(&events, now);
@@ -419,7 +438,7 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
         Outcome::Released(reason) => EventBody::released(&args.id, by, reason),
     };
 
-    let event = Event::new(now.to_string(), body.with_meta(meta));
+    let event = Event::new(event_ts, body.with_meta(meta)).with_source(source);
     append(&event)?;
     events.push(event);
 
@@ -534,7 +553,7 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
-    let now_ts = now.to_string();
+    let (event_ts, source) = event_timestamp(args.ts.as_deref(), now)?;
 
     // An already-resolved promise may still be assessed. §4: an assessment is "never
     // terminal", and §3 wants contradicting judgments visible rather than suppressed
@@ -548,13 +567,14 @@ fn assess(args: AssessArgs) -> Result<(), Fail> {
         if let Some(reference) = &supersedes {
             check_supersedes(view, &observer, reference)?;
         }
-        check_assessment_timestamp(&events, &args.id, &observer, &now_ts)?;
+        check_assessment_timestamp(&events, &args.id, &observer, &event_ts)?;
     }
 
     let event = Event::new(
-        now_ts,
+        event_ts,
         EventBody::assessment(&args.id, state, observer, note, supersedes).with_meta(meta),
-    );
+    )
+    .with_source(source);
     append(&event)?;
     events.push(event);
 
@@ -569,8 +589,11 @@ fn check_assessment_timestamp(
     observer: &str,
     now_ts: &str,
 ) -> Result<(), Fail> {
+    let second = Timestamp::from_str(now_ts)
+        .map(|ts| ts.as_second())
+        .unwrap_or_default();
     if events.iter().any(|event| {
-        event.ts == now_ts
+        Timestamp::from_str(&event.ts).is_ok_and(|ts| ts.as_second() == second)
             && matches!(
                 &event.body,
                 EventBody::Assess { promise, observer: author, .. }
@@ -692,6 +715,9 @@ fn check_supersedes(view: &PromiseView, observer: &str, reference: &str) -> Resu
 struct Row<'a> {
     #[serde(flatten)]
     record: Cow<'a, Promise>,
+    ts: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
     state: &'static str,
 }
 
@@ -717,6 +743,8 @@ struct WaiterRow<'a> {
 fn row<'a>(view: &PromiseView<'a>) -> Row<'a> {
     Row {
         record: view.current_record(),
+        ts: view.horizons[0].ts,
+        source: view.horizons[0].source,
         state: view.state.as_str(),
     }
 }
@@ -883,6 +911,9 @@ fn print_empty_ls(folded: &Fold<'_>) {
 struct Detail<'a> {
     #[serde(flatten)]
     record: Cow<'a, Promise>,
+    ts: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
     state: &'static str,
     /// Every deadline this promise has had, in log order — the declaration first, then
     /// one entry per `amend`. Always at least one, and its last entry's `until` is the
@@ -904,6 +935,8 @@ struct Detail<'a> {
 #[derive(Serialize)]
 struct HorizonJson<'a> {
     ts: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
     until: &'a str,
     by: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -919,6 +952,8 @@ struct ResolutionJson<'a> {
     #[serde(rename = "as")]
     kind: &'a str,
     ts: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
     by: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     evidence: Option<&'a [String]>,
@@ -932,6 +967,8 @@ struct ResolutionJson<'a> {
 #[derive(Serialize)]
 struct AssessmentJson<'a> {
     ts: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
     state: &'a str,
     observer: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -987,6 +1024,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             Resolution::Satisfied { evidence, .. } => ResolutionJson {
                 kind: resolution.as_str(),
                 ts: &event.ts,
+                source: event.source.as_deref(),
                 by: resolution.by(),
                 evidence: Some(evidence.as_slice()),
                 reason: None,
@@ -995,6 +1033,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             Resolution::Cancelled { reason, .. } => ResolutionJson {
                 kind: resolution.as_str(),
                 ts: &event.ts,
+                source: event.source.as_deref(),
                 by: resolution.by(),
                 evidence: None,
                 reason: Some(reason.as_str()),
@@ -1003,6 +1042,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             Resolution::Released { reason, .. } => ResolutionJson {
                 kind: resolution.as_str(),
                 ts: &event.ts,
+                source: event.source.as_deref(),
                 by: resolution.by(),
                 evidence: None,
                 reason: reason.as_deref(),
@@ -1016,6 +1056,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         .iter()
         .map(|horizon| HorizonJson {
             ts: horizon.ts,
+            source: horizon.source,
             until: horizon.until,
             by: horizon.by,
             reason: horizon.reason,
@@ -1036,6 +1077,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 ..
             } => Some(AssessmentJson {
                 ts: &assessed.event.ts,
+                source: assessed.event.source.as_deref(),
                 state,
                 observer,
                 note: note.as_deref(),
@@ -1063,6 +1105,8 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     if args.json {
         let detail = Detail {
             record: view.current_record(),
+            ts: view.horizons[0].ts,
+            source: view.horizons[0].source,
             state: view.state.as_str(),
             horizons,
             resolution,
@@ -1080,6 +1124,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         println!("  on           {on}");
     }
     println!("  until        {}", view.until());
+    if view.horizons[0].source == Some("supplied") {
+        println!("  declared     {} (supplied)", view.horizons[0].ts);
+    }
     if let Some(task) = &view.record.task {
         println!("  task         {task}");
     }
@@ -1105,8 +1152,15 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                     .unwrap_or_default()
             };
             println!(
-                "    {}  {}  {}{note}",
-                horizon.ts, horizon.until, horizon.by
+                "    {}  {}  {}{note}{}",
+                horizon.ts,
+                horizon.until,
+                horizon.by,
+                if index > 0 && horizon.source == Some("supplied") {
+                    "  (supplied)"
+                } else {
+                    ""
+                }
             );
             if let Some(meta) = horizon.meta {
                 println!("      meta     {}", one_line(meta));
@@ -1117,8 +1171,15 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     match &resolution {
         Some(resolution) => {
             println!(
-                "  resolution   {} at {} by {}",
-                resolution.kind, resolution.ts, resolution.by
+                "  resolution   {} at {} by {}{}",
+                resolution.kind,
+                resolution.ts,
+                resolution.by,
+                if resolution.source == Some("supplied") {
+                    " (supplied)"
+                } else {
+                    ""
+                }
             );
             if let Some(evidence) = resolution.evidence {
                 for reference in evidence {
@@ -1145,8 +1206,15 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 .map(|n| format!("  {n}"))
                 .unwrap_or_default();
             println!(
-                "    {}  {}  {}{note}",
-                assessment.ts, assessment.state, assessment.observer
+                "    {}  {}  {}{note}{}",
+                assessment.ts,
+                assessment.state,
+                assessment.observer,
+                if assessment.source == Some("supplied") {
+                    "  (supplied)"
+                } else {
+                    ""
+                }
             );
             // Its standing, one line each and only when there is something to say: an
             // unresolved promise with no supersedes prints exactly what it always did.
@@ -1232,6 +1300,32 @@ fn append(event: &Event) -> Result<(), Fail> {
 fn now_to_the_second() -> Timestamp {
     let now = Timestamp::now();
     Timestamp::from_second(now.as_second()).unwrap_or(now)
+}
+
+/// Allow small clock disagreement during import, without accepting future history.
+const MAX_FUTURE_SKEW_SECONDS: i64 = 300;
+
+/// Choose the event's timestamp and its honest provenance label.
+fn event_timestamp(supplied: Option<&str>, now: Timestamp) -> Result<(String, &'static str), Fail> {
+    let Some(raw) = supplied else {
+        return Ok((now.to_string(), "cli"));
+    };
+    let parsed = Timestamp::from_str(raw.trim()).map_err(|e| {
+        Fail::Usage(format!(
+            "--ts `{raw}` is not an ISO-8601 instant: {e}. An event timestamp needs an offset (§4). Nothing was appended"
+        ))
+    })?;
+    let limit = Timestamp::from_second(now.as_second() + MAX_FUTURE_SKEW_SECONDS).unwrap_or(now);
+    if parsed > limit {
+        return Err(Fail::Usage(format!(
+            "--ts `{raw}` is more than five minutes in the future: supplied history may be past, \
+             but pinki allows only 300 seconds of clock skew (§4, timestamp provenance). Nothing was appended"
+        )));
+    }
+    // Assessment references have one-second precision (§7). Store all new events at
+    // that precision so two spellings of the same instant cannot create two names.
+    let second = Timestamp::from_second(parsed.as_second()).unwrap_or(parsed);
+    Ok((second.to_string(), "supplied"))
 }
 
 /// What every mutating verb prints: the id, a tab, and the state the ledger now folds
@@ -1477,6 +1571,7 @@ mod tests {
     fn satisfied_without_evidence_is_malformed() {
         let args = ResolveArgs {
             id: "pnk_4f3a91".into(),
+            ts: None,
             satisfied: true,
             cancelled: false,
             released: false,
@@ -1494,6 +1589,7 @@ mod tests {
     fn blank_evidence_is_malformed() {
         let args = ResolveArgs {
             id: "pnk_4f3a91".into(),
+            ts: None,
             satisfied: true,
             cancelled: false,
             released: false,
@@ -1509,6 +1605,7 @@ mod tests {
     fn cancelled_needs_a_reason_and_refuses_evidence() {
         let bare = ResolveArgs {
             id: "pnk_4f3a91".into(),
+            ts: None,
             satisfied: false,
             cancelled: true,
             released: false,
@@ -1531,6 +1628,7 @@ mod tests {
     fn released_takes_an_optional_reason() {
         let args = ResolveArgs {
             id: "pnk_4f3a91".into(),
+            ts: None,
             satisfied: false,
             cancelled: false,
             released: true,

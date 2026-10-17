@@ -7,9 +7,9 @@
 //!
 //! ## The wire shape is the contract
 //!
-//! §4's examples are normative down to key order: `ts` first, then `type`, then the
-//! body. [`Event`] gets that by holding `ts` and flattening the tagged [`EventBody`]
-//! after it.
+//! §4's examples put `ts` first, then `type`, then the body. New CLI lines put
+//! `source` after `ts`; the optional `meta` still comes last. [`Event`] keeps that
+//! order by flattening the tagged [`EventBody`] after the timestamp fields.
 //!
 //! ## The deliberate field-name collision
 //!
@@ -67,6 +67,9 @@ pub const RETRACTED: &str = "retracted";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub ts: String,
+    /// Absent on old ledger lines; new CLI writes label how it obtained `ts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(flatten)]
     pub body: EventBody,
 }
@@ -76,8 +79,15 @@ impl Event {
     pub fn new(ts: impl Into<String>, body: EventBody) -> Self {
         Self {
             ts: ts.into(),
+            source: None,
             body,
         }
+    }
+
+    /// Mark a timestamp written by the CLI or supplied by its caller.
+    pub fn with_source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
+        self
     }
 
     /// The promise id this event is about — the record's `id` for a `promise` event,
@@ -575,11 +585,13 @@ mod tests {
     #[test]
     fn every_event_type_round_trips() {
         for ev in [
-            Event::new("2026-08-28T20:14:03Z", EventBody::promise(record())),
+            Event::new("2026-08-28T20:14:03Z", EventBody::promise(record()))
+                .with_source("supplied"),
             Event::new(
                 "2026-09-01T16:02:11Z",
                 EventBody::satisfied("pnk_4f3a91", "…/reviewer", vec!["sha:abc".into()]),
-            ),
+            )
+            .with_source("cli"),
             Event::new(
                 "2026-09-01T16:02:11Z",
                 EventBody::cancelled("pnk_4f3a91", "…/reviewer", "withdrawn"),
@@ -612,6 +624,14 @@ mod tests {
             });
             assert_eq!(ev, back, "round-trip changed {text}");
         }
+    }
+
+    #[test]
+    fn old_events_keep_source_absent() {
+        let old = r#"{"ts":"2026-08-28T20:14:03Z","type":"promise","id":"pnk_4f3a91","promise":"hand back a reviewed schema","by":"…/reviewer","to":"…/author","until":"2026-09-01T17:00:00Z"}"#;
+        let event: Event = serde_json::from_str(old).expect("old ledger line");
+        assert_eq!(event.source, None);
+        assert!(!serde_json::to_string(&event).unwrap().contains("source"));
     }
 
     #[test]
