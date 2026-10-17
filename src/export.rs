@@ -76,6 +76,12 @@ struct Assessment<'a> {
     note: Option<&'a str>,
     at: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    supersedes: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<&'a str>,
+    #[serde(skip_serializing_if = "is_false")]
+    after_resolution: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<&'a Meta>,
 }
 
@@ -219,19 +225,22 @@ fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
     let mut assessments: Vec<Assessment<'_>> = view
         .assessments
         .iter()
-        .map(|assessed| assessed.event)
-        .filter_map(|event| match &event.body {
+        .filter_map(|assessed| match &assessed.event.body {
             EventBody::Assess {
                 state,
                 observer,
                 note,
+                supersedes,
                 meta,
                 ..
             } => Some(Assessment {
                 state,
                 observer,
                 note: note.as_deref(),
-                at: &event.ts,
+                at: &assessed.event.ts,
+                supersedes: supersedes.as_deref(),
+                superseded_by: assessed.superseded_by.map(|later| later.ts.as_str()),
+                after_resolution: assessed.after_resolution,
                 meta: meta.as_ref(),
             }),
             _ => None,
@@ -253,4 +262,8 @@ fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
 fn encode<T: Serialize>(value: &T) -> Result<String, Fail> {
     serde_json::to_string(value)
         .map_err(|e| Fail::Op(format!("could not encode export as JSON: {e}")))
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
