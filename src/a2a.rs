@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use crate::record::Promise;
@@ -58,11 +59,42 @@ pub fn card() -> Result<String, serde_json::Error> {
 /// This is the object you merge into a `Task`'s `metadata`, not a whole `Task`.
 /// pinki has no A2A task `status` and no way to learn one, so it emits no fabricated
 /// Task envelope. The value is the same detail read model as `show --json`, with the
-/// declaration still at the same path for older readers.
-pub fn task_metadata<T: Serialize>(detail: &T) -> Result<String, serde_json::Error> {
-    let mut block: BTreeMap<String, &T> = BTreeMap::new();
-    block.insert(metadata_key(), detail);
+/// declaration still at the same path for older readers. Provenance belongs to
+/// the extension value, not the A2A Task envelope.
+pub fn task_metadata<T: Serialize>(
+    detail: &T,
+    as_of: &str,
+    ledger_ref: &str,
+) -> Result<String, serde_json::Error> {
+    let mut block = BTreeMap::new();
+    block.insert(
+        metadata_key(),
+        TaskValue {
+            detail,
+            provenance: Provenance { as_of, ledger_ref },
+        },
+    );
     serde_json::to_string_pretty(&block)
+}
+
+/// A path-free reference to the exact ledger bytes that supplied the fold.
+/// The same contents in a copied ledger have the same reference.
+pub fn ledger_ref(contents: &str) -> String {
+    let digest = Sha256::digest(contents.as_bytes());
+    format!("sha256:{digest:x}")
+}
+
+#[derive(Serialize)]
+struct TaskValue<'a, T: Serialize> {
+    #[serde(flatten)]
+    detail: &'a T,
+    provenance: Provenance<'a>,
+}
+
+#[derive(Serialize)]
+struct Provenance<'a> {
+    as_of: &'a str,
+    ledger_ref: &'a str,
 }
 
 #[derive(Serialize)]
@@ -124,7 +156,7 @@ mod tests {
 
     #[test]
     fn task_block_is_one_uri_prefixed_key_carrying_the_record() {
-        let json = task_metadata(&record()).unwrap();
+        let json = task_metadata(&record(), "2026-09-01T16:00:00Z", "sha256:abc").unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), 1);
@@ -133,13 +165,17 @@ mod tests {
             key,
             "https://github.com/azigler/pinki/ext/promise/v0/promise"
         );
-        let back: Promise = serde_json::from_value(carried.clone()).unwrap();
+        let mut record_value = carried.clone();
+        assert_eq!(record_value["provenance"]["as_of"], "2026-09-01T16:00:00Z");
+        assert_eq!(record_value["provenance"]["ledger_ref"], "sha256:abc");
+        record_value.as_object_mut().unwrap().remove("provenance");
+        let back: Promise = serde_json::from_value(record_value).unwrap();
         assert_eq!(back, record());
     }
 
     #[test]
     fn task_block_keeps_the_records_field_order() {
-        let json = task_metadata(&record()).unwrap();
+        let json = task_metadata(&record(), "2026-09-01T16:00:00Z", "sha256:abc").unwrap();
         let order: Vec<&str> = ["id", "promise", "by", "to", "on", "until", "task"]
             .into_iter()
             .collect();

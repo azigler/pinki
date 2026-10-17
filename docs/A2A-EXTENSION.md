@@ -114,7 +114,8 @@ On a `Task` whose work a promise is about (excerpt showing the metadata block):
       "state":   "satisfied",
       "horizons": [{"ts":"2026-08-28T20:14:03Z","until":"2026-09-01T17:00:00Z","by":"https://example.org/agents/reviewer"}],
       "resolution": {"as":"satisfied","ts":"2026-09-01T16:02:11Z","by":"https://example.org/agents/reviewer","evidence":["https://example.org/reviews/91"]},
-      "assessments": []
+      "assessments": [],
+      "provenance": {"as_of":"2026-09-01T16:05:00Z","ledger_ref":"sha256:<ledger-snapshot-digest>"}
     }
   }
 }
@@ -125,6 +126,17 @@ a2a task` adds the same computed read fields as `show --json`: `ts`, optional
 timestamp `source`, `state`, `horizons`, `resolution`, and `assessments`. An open
 promise has `resolution: null`; a satisfied one carries its resolution and evidence.
 The `state` here is pinki's computed promise state, **not** `TaskStatus.state`.
+It is true **as of** `provenance.as_of` only. A receiver uses that UTC instant to
+judge whether the computed state is stale before relying on it. `pinki a2a task
+--now ISO ID` fixes the instant to a UTC second for reproducible output; without
+`--now`, pinki uses the current UTC second. `provenance.ledger_ref` is an opaque
+`sha256:` reference to the ledger snapshot that supplied the read model. It changes
+when that snapshot changes, stays the same for a copied ledger, and never exposes a
+local filesystem path. Compare it with a fresh reference from the authoritative
+ledger when one is available. Consul's 2026-08-29 A2A ruling requires the record
+verbatim plus `{ledger_ref, as_of}` across a trust boundary so a stale copy can be
+detected.
+
 The optional `source` on the declaration, horizons, resolution, and assessments
 uses the same names and values as `show --json`. At most one promise per Task
 rides under this extension. After an `amend`, the declaration's `until` here is

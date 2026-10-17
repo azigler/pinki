@@ -92,7 +92,7 @@ pub fn run(command: Command) -> Result<(), Fail> {
         Command::Export(args) => export::run(args),
         Command::A2a { command } => match command {
             A2aCommand::Card => a2a_card(),
-            A2aCommand::Task { id } => a2a_task(&id),
+            A2aCommand::Task { id, now } => a2a_task(&id, now.as_deref()),
         },
     }
 }
@@ -1287,16 +1287,27 @@ fn a2a_card() -> Result<(), Fail> {
     Ok(())
 }
 
-fn a2a_task(id: &str) -> Result<(), Fail> {
-    let events = read_existing_ledger()?;
-    let folded = fold(&events, now_to_the_second());
+fn a2a_task(id: &str, supplied_now: Option<&str>) -> Result<(), Fail> {
+    let instant = match supplied_now {
+        Some(value) => Timestamp::from_str(value.trim()).map_err(|e| {
+            Fail::Usage(format!(
+                "--now `{value}` is not an ISO-8601 instant with an offset: {e}"
+            ))
+        })?,
+        None => now_to_the_second(),
+    };
+    let now = Timestamp::from_second(instant.as_second()).unwrap_or(instant);
+    let (events, contents) =
+        ledger::read_existing_snapshot().map_err(|e| Fail::Op(e.to_string()))?;
+    let ledger_ref = a2a::ledger_ref(&contents);
+    let folded = fold(&events, now);
     let view = folded.get(id).ok_or_else(|| unknown_id(id, "a2a task"))?;
 
     // Use the same read model as `show --json`. Its `state` is pinki's computed
     // promise state, not the A2A TaskStatus state.
     println!(
         "{}",
-        a2a::task_metadata(&detail(view))
+        a2a::task_metadata(&detail(view), &now.to_string(), &ledger_ref)
             .map_err(|e| Fail::Op(format!("could not encode the Task metadata block: {e}")))?
     );
     Ok(())

@@ -159,7 +159,9 @@ pub fn read() -> Result<Vec<Event>, Error> {
 /// Read the whole ledger from an explicit path. A missing file is zero events.
 pub fn read_at(path: &Path) -> Result<Vec<Event>, Error> {
     // No file means nobody has promised anything yet.
-    Ok(read_if_present(path)?.unwrap_or_default())
+    Ok(read_if_present(path)?
+        .map(|(events, _)| events)
+        .unwrap_or_default())
 }
 
 /// Read the whole ledger from the configured path, for a verb that only reads. A
@@ -173,6 +175,18 @@ pub fn read_existing() -> Result<Vec<Event>, Error> {
 /// Read the whole ledger from an explicit path, refusing a missing file. `origin` is
 /// only for the message.
 pub fn read_existing_at(path: &Path, origin: Origin) -> Result<Vec<Event>, Error> {
+    read_existing_snapshot_at(path, origin).map(|(events, _)| events)
+}
+
+/// Read events and the exact bytes that supplied them, in one file read. The
+/// contents let an A2A peer name this ledger snapshot without exposing its path.
+pub fn read_existing_snapshot() -> Result<(Vec<Event>, String), Error> {
+    let from_env = std::env::var_os(ENV_VAR);
+    let origin = origin_of(from_env.as_ref());
+    read_existing_snapshot_at(&resolve_path(from_env), origin)
+}
+
+fn read_existing_snapshot_at(path: &Path, origin: Origin) -> Result<(Vec<Event>, String), Error> {
     read_if_present(path)?.ok_or_else(|| Error::Missing {
         path: absolute(path),
         origin,
@@ -180,7 +194,7 @@ pub fn read_existing_at(path: &Path, origin: Origin) -> Result<Vec<Event>, Error
 }
 
 /// Every event in the file at `path`, or `None` when there is no file.
-fn read_if_present(path: &Path) -> Result<Option<Vec<Event>>, Error> {
+fn read_if_present(path: &Path) -> Result<Option<(Vec<Event>, String)>, Error> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(source) if source.kind() == ErrorKind::NotFound => return Ok(None),
@@ -222,7 +236,7 @@ fn read_if_present(path: &Path) -> Result<Option<Vec<Event>>, Error> {
             }
         }
     }
-    Ok(Some(events))
+    Ok(Some((events, text)))
 }
 
 /// Append one event to the configured ledger, creating it (and its directory) if this
