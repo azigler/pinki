@@ -32,7 +32,7 @@ pub enum Command {
     Promise(PromiseArgs),
     /// Move a promise's deadline. The debtor's own act; every prior horizon is kept.
     Amend(AmendArgs),
-    /// End a promise: satisfied (with evidence), cancelled (with a reason), or released.
+    /// End a promise with one of five attributed outcomes.
     Resolve(ResolveArgs),
     /// Relabel the outcome of the winning resolution; keep its original log line.
     Correct(CorrectArgs),
@@ -124,7 +124,7 @@ pub struct AmendArgs {
     ArgGroup::new("outcome")
         .required(true)
         .multiple(false)
-        .args(["satisfied", "cancelled", "released"])
+        .args(["satisfied", "cancelled", "released", "lapsed", "refused"])
 ))]
 pub struct ResolveArgs {
     /// The promise being resolved.
@@ -146,12 +146,20 @@ pub struct ResolveArgs {
     #[arg(long)]
     pub released: bool,
 
+    /// The horizon passed and the work can no longer be done. Requires --by.
+    #[arg(long)]
+    pub lapsed: bool,
+
+    /// The debtor says the work will not be done. Requires --reason and --by.
+    #[arg(long)]
+    pub refused: bool,
+
     /// A reference pointing outward at something another party could go and look at.
     /// Repeatable. Required with --satisfied.
     #[arg(long, value_name = "REF")]
     pub evidence: Vec<String>,
 
-    /// Why. Required with --cancelled, optional with --released.
+    /// Why. Required with --cancelled and --refused; optional with --released and --lapsed.
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
@@ -159,8 +167,7 @@ pub struct ResolveArgs {
     #[arg(long, value_name = "TEXT")]
     pub note: Option<String>,
 
-    /// Who is claiming this. Defaults to the debtor for --satisfied/--cancelled and
-    /// to the creditor for --released. pinki records the claim; it never checks it.
+    /// Who is claiming this. Required for --lapsed and --refused.
     #[arg(long, value_name = "WHO")]
     pub by: Option<String>,
 
@@ -175,7 +182,7 @@ pub struct CorrectArgs {
     pub id: String,
 
     /// The corrected outcome.
-    #[arg(long = "as", value_name = "STATE", value_parser = ["satisfied", "cancelled", "released"])]
+    #[arg(long = "as", value_name = "STATE", value_parser = ["satisfied", "cancelled", "released", "lapsed", "refused"])]
     pub outcome: String,
 
     /// A reference to completed work. Required for --as satisfied; repeatable.
@@ -244,7 +251,7 @@ pub struct AssessArgs {
 #[command(group(
     ArgGroup::new("scope")
         .multiple(false)
-        .args(["open", "overdue", "all"])
+        .args(["open", "overdue", "all", "state"])
 ))]
 pub struct LsArgs {
     /// Everything not in a terminal state: conditional + detached + overdue. The default.
@@ -258,6 +265,10 @@ pub struct LsArgs {
     /// Every promise, terminal states included.
     #[arg(long)]
     pub all: bool,
+
+    /// One computed state, including terminal outcomes.
+    #[arg(long, value_name = "STATE", value_parser = ["conditional", "detached", "overdue", "satisfied", "cancelled", "released", "lapsed", "refused", "expired"])]
+    pub state: Option<String>,
 
     /// Only promises owed BY this identity.
     #[arg(long, value_name = "WHO")]
@@ -280,7 +291,9 @@ impl LsArgs {
     /// Which computed states to show. `--open` when nothing is asked for: §5's `ls`
     /// is a working list, and a terminal promise is not work.
     pub fn scope(&self) -> Scope {
-        if self.all {
+        if let Some(state) = &self.state {
+            Scope::State(state.clone())
+        } else if self.all {
             Scope::All
         } else if self.overdue {
             Scope::Overdue
@@ -291,7 +304,7 @@ impl LsArgs {
 }
 
 /// The state filter `ls` applies — §5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     /// conditional + detached + overdue.
     Open,
@@ -299,6 +312,8 @@ pub enum Scope {
     Overdue,
     /// Everything, terminal states included.
     All,
+    /// One named computed state.
+    State(String),
 }
 
 #[derive(Debug, Args)]
@@ -328,7 +343,7 @@ pub struct ExportArgs {
     pub format: ExportFormat,
 
     /// Include only these computed states. Repeat to include more than one.
-    #[arg(long, value_name = "STATE", value_parser = ["conditional", "detached", "overdue", "satisfied", "cancelled", "released", "expired"])]
+    #[arg(long, value_name = "STATE", value_parser = ["conditional", "detached", "overdue", "satisfied", "cancelled", "released", "lapsed", "refused", "expired"])]
     pub state: Vec<String>,
 
     /// Include only promises owed by this identity.

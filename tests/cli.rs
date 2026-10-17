@@ -1385,6 +1385,160 @@ fn resolve_cancelled_requires_a_reason() {
 }
 
 #[test]
+fn lapsed_checks_the_current_horizon_and_is_terminal_everywhere() {
+    let scratch = Scratch::new();
+    let id = scratch.promise(
+        "deliver before the window shuts",
+        "debtor",
+        "creditor",
+        PAST,
+    );
+    scratch
+        .run(&["amend", &id, "--until", FUTURE, "--by", "debtor"])
+        .expect(0);
+    let before = scratch.lines();
+    let early = scratch.run(&["resolve", &id, "--lapsed", "--by", "observer"]);
+    early.expect(1);
+    assert!(early.stderr.contains("current horizon"), "{}", early.stderr);
+    assert_eq!(scratch.lines(), before);
+
+    scratch
+        .run(&["amend", &id, "--until", PAST, "--by", "debtor"])
+        .expect(0);
+    let run = scratch.run(&["resolve", &id, "--lapsed", "--by", "observer"]);
+    run.expect(0);
+    assert_eq!(run.state(), "lapsed");
+    assert_eq!(scratch.run(&["ls", "--json"]).json(), serde_json::json!([]));
+    assert_eq!(
+        scratch.run(&["ls", "--open", "--json"]).json(),
+        serde_json::json!([])
+    );
+    assert_eq!(
+        scratch.run(&["ls", "--state", "lapsed", "--json"]).json()[0]["id"],
+        id
+    );
+    assert_eq!(
+        scratch.run(&["ls", "--all", "--tree", "--json"]).json()[0]["state"],
+        "lapsed"
+    );
+    let detail = scratch.run(&["show", &id, "--json"]).json();
+    assert_eq!(detail["state"], "lapsed");
+    assert_eq!(detail["resolution"]["as"], "lapsed");
+    assert_eq!(detail["resolution"]["by"], "observer");
+    assert!(scratch
+        .run(&["show", &id])
+        .stdout
+        .contains("resolution   lapsed"));
+    let exported = scratch.run(&["export", "--state", "lapsed"]).json();
+    assert_eq!(exported["version"], 1);
+    assert_eq!(exported["promises"][0]["state"], "lapsed");
+    assert_eq!(exported["promises"][0]["resolution"]["as"], "lapsed");
+    let jsonl = scratch.run(&["export", "--format", "jsonl"]).stdout;
+    let row: serde_json::Value = serde_json::from_str(jsonl.trim()).unwrap();
+    assert_eq!(row, exported["promises"][0]);
+    let key = "https://github.com/azigler/pinki/ext/promise/v0/promise";
+    assert_eq!(
+        scratch.run(&["a2a", "task", &id]).json()[key]["state"],
+        "lapsed"
+    );
+
+    scratch
+        .run(&[
+            "correct",
+            &id,
+            "--as",
+            "satisfied",
+            "--evidence",
+            "sha:done",
+            "--reason",
+            "work was done",
+            "--by",
+            "stranger",
+        ])
+        .expect(1);
+    scratch
+        .run(&[
+            "correct",
+            &id,
+            "--as",
+            "satisfied",
+            "--evidence",
+            "sha:done",
+            "--reason",
+            "work was done",
+            "--by",
+            "observer",
+        ])
+        .expect(0);
+    assert_eq!(state_of(&scratch, &id), "satisfied");
+    scratch
+        .run(&[
+            "correct",
+            &id,
+            "--as",
+            "lapsed",
+            "--reason",
+            "the work was not done",
+            "--by",
+            "observer",
+        ])
+        .expect(0);
+    assert_eq!(state_of(&scratch, &id), "lapsed");
+}
+
+#[test]
+fn refused_requires_debtor_and_reason_and_is_terminal() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("write the report", "debtor", "creditor", FUTURE);
+    let before = scratch.lines();
+    let missing = scratch.run(&["resolve", &id, "--refused", "--by", "debtor"]);
+    missing.expect(2);
+    assert!(missing.stderr.contains("--reason"));
+    let other = scratch.run(&[
+        "resolve",
+        &id,
+        "--refused",
+        "--reason",
+        "cannot do it",
+        "--by",
+        "creditor",
+    ]);
+    other.expect(1);
+    assert!(other.stderr.contains("only debtor"), "{}", other.stderr);
+    assert_eq!(scratch.lines(), before);
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--refused",
+            "--reason",
+            "cannot do it",
+            "--by",
+            "debtor",
+        ])
+        .expect(0);
+    assert_eq!(state_of(&scratch, &id), "refused");
+    assert_eq!(
+        scratch.run(&["ls", "--open", "--json"]).json(),
+        serde_json::json!([])
+    );
+    assert_eq!(
+        scratch.run(&["ls", "--state", "refused", "--json"]).json()[0]["state"],
+        "refused"
+    );
+    assert_eq!(
+        scratch.run(&["export", "--state", "refused"]).json()["promises"][0]["resolution"]
+            ["reason"],
+        "cannot do it"
+    );
+    let key = "https://github.com/azigler/pinki/ext/promise/v0/promise";
+    assert_eq!(
+        scratch.run(&["a2a", "task", &id]).json()[key]["state"],
+        "refused"
+    );
+}
+
+#[test]
 fn resolve_released_defaults_by_to_the_creditor() {
     let scratch = Scratch::new();
     let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);

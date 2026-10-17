@@ -325,6 +325,40 @@ impl EventBody {
         }
     }
 
+    /// `resolve … --lapsed`. The current deadline has passed; any party may say so.
+    pub fn lapsed(
+        promise: impl Into<String>,
+        by: impl Into<String>,
+        reason: Option<String>,
+    ) -> Self {
+        EventBody::Resolve {
+            promise: promise.into(),
+            resolution: Resolution::Lapsed {
+                by: by.into(),
+                reason,
+            },
+            note: None,
+            meta: None,
+        }
+    }
+
+    /// `resolve … --refused`. The debtor says the work will not be done.
+    pub fn refused(
+        promise: impl Into<String>,
+        by: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        EventBody::Resolve {
+            promise: promise.into(),
+            resolution: Resolution::Refused {
+                by: by.into(),
+                reason: reason.into(),
+            },
+            note: None,
+            meta: None,
+        }
+    }
+
     pub fn correction(
         promise: impl Into<String>,
         outcome: CorrectAs,
@@ -374,13 +408,15 @@ impl EventBody {
     }
 }
 
-/// The three terminal outcomes a correction may assign.
+/// The terminal outcomes a correction may assign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CorrectAs {
     Satisfied,
     Cancelled,
     Released,
+    Lapsed,
+    Refused,
 }
 
 impl CorrectAs {
@@ -389,6 +425,8 @@ impl CorrectAs {
             Self::Satisfied => "satisfied",
             Self::Cancelled => "cancelled",
             Self::Released => "released",
+            Self::Lapsed => "lapsed",
+            Self::Refused => "refused",
         }
     }
 }
@@ -424,6 +462,14 @@ pub enum Resolution {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// The clock ran out and the work can no longer be done. Any party may issue it.
+    Lapsed {
+        by: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// The debtor says the work will not be done, with a reason.
+    Refused { by: String, reason: String },
 }
 
 impl Resolution {
@@ -433,6 +479,8 @@ impl Resolution {
             Resolution::Satisfied { .. } => "satisfied",
             Resolution::Cancelled { .. } => "cancelled",
             Resolution::Released { .. } => "released",
+            Resolution::Lapsed { .. } => "lapsed",
+            Resolution::Refused { .. } => "refused",
         }
     }
 
@@ -442,7 +490,9 @@ impl Resolution {
         match self {
             Resolution::Satisfied { by, .. }
             | Resolution::Cancelled { by, .. }
-            | Resolution::Released { by, .. } => by,
+            | Resolution::Released { by, .. }
+            | Resolution::Lapsed { by, .. }
+            | Resolution::Refused { by, .. } => by,
         }
     }
 }
