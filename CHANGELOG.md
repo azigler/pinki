@@ -13,6 +13,13 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- `resolve --note TEXT` stores a prose note on the resolve event. `show` displays
+  it in text and JSON. It never counts as evidence for satisfaction (#8).
+- `a2a task` adds the `show --json` read model under its existing extension key:
+  computed promise state, resolution with evidence, and attributed assessments.
+  The declaration stays at the same path (#7).
+- DESIGN.md §4 gives cursor and writer rules for building ledger readers (#3).
+
 - `promise`, `resolve`, `assess`, and `amend` accept `--ts ISO`; a stdin promise
   record may carry `ts`. New events label timestamp `source` as `supplied` or
   `cli`. Supplied timestamps may be past but at most 300 seconds ahead of the

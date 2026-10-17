@@ -1180,10 +1180,15 @@ fn the_a2a_block_carries_the_horizon_as_it_stands() {
     // A peer computing `now > until` for itself must get the answer this ledger gets —
     // the divergence that filed issue #9 was exactly this, 32 minutes wide.
     assert_eq!(record["until"], FUTURE);
+    assert_eq!(record["state"], "detached");
+    let mut without_provenance = record.clone();
+    without_provenance
+        .as_object_mut()
+        .unwrap()
+        .remove("provenance");
     assert_eq!(
-        record.as_object().expect("record object").len(),
-        5,
-        "still the §1 record and nothing else: {record}"
+        without_provenance,
+        scratch.run(&["show", &id, "--json"]).json()
     );
 }
 
@@ -1229,6 +1234,40 @@ fn satisfied_without_evidence_leaves_the_ledger_untouched() {
         run.stderr
     );
     assert_eq!(scratch.lines(), before, "the ledger must be unchanged");
+}
+
+#[test]
+fn resolve_note_is_shown_but_never_counts_as_evidence() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send the draft schema", "author", "reviewer", FUTURE);
+    let before = scratch.lines();
+    let refused = scratch.run(&["resolve", &id, "--satisfied", "--note", "delivered"]);
+    refused.expect(2);
+    assert!(refused.stderr.contains("--evidence"));
+    assert_eq!(scratch.lines(), before);
+
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--satisfied",
+            "--evidence",
+            "sha:abc",
+            "--note",
+            "delivered after review",
+        ])
+        .expect(0);
+    let event: serde_json::Value = serde_json::from_str(&scratch.lines()[1]).unwrap();
+    assert_eq!(event["note"], "delivered after review");
+    assert_eq!(event["evidence"], serde_json::json!(["sha:abc"]));
+    let shown = scratch.run(&["show", &id, "--json"]).json();
+    assert_eq!(shown["resolution"]["note"], "delivered after review");
+    assert_eq!(
+        shown["resolution"]["evidence"],
+        serde_json::json!(["sha:abc"])
+    );
+    let text = scratch.run(&["show", &id]).stdout;
+    assert!(text.contains("note       delivered after review"), "{text}");
 }
 
 #[test]
@@ -2858,7 +2897,7 @@ fn a2a_task_emits_the_metadata_block_for_one_promise() {
         "https://github.com/azigler/pinki/ext/promise/v0/promise"
     );
 
-    // The record round-trips: it is §1's record verbatim, with no computed state.
+    // The declaration stays at the old path. The rest is the show read model.
     assert_eq!(record["id"], b.as_str());
     assert_eq!(record["promise"], "hand back a review");
     assert_eq!(record["by"], "reviewer");
@@ -2866,11 +2905,157 @@ fn a2a_task_emits_the_metadata_block_for_one_promise() {
     assert_eq!(record["on"], a.as_str());
     assert_eq!(record["until"], FUTURE);
     assert_eq!(record["task"], "a2a-task-9c1f0e");
-    assert!(
-        record.get("state").is_none(),
-        "A2A-EXTENSION.md §2: no computed state rides the block"
+    assert_eq!(record["state"], "conditional");
+    assert!(record["resolution"].is_null());
+    assert_eq!(record["assessments"], serde_json::json!([]));
+    let provenance = &record["provenance"];
+    assert!(provenance["as_of"].as_str().unwrap().ends_with('Z'));
+    assert!(provenance["ledger_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha256:"));
+    assert!(!run.stdout.contains(&scratch.ledger().display().to_string()));
+    assert!(block.get("status").is_none(), "no A2A Task.status");
+    assert!(block.get("TaskStatus").is_none(), "no A2A TaskStatus");
+    let mut without_provenance = record.clone();
+    without_provenance
+        .as_object_mut()
+        .unwrap()
+        .remove("provenance");
+    assert_eq!(
+        without_provenance,
+        scratch.run(&["show", &b, "--json"]).json()
     );
-    assert_eq!(record.as_object().expect("record object").len(), 7);
+}
+
+#[test]
+fn a2a_task_now_fixes_the_read_instant_and_copied_ledger_reference() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("send review", "reviewer", "author", PAST);
+    let args = ["a2a", "task", &id, "--now", "2026-09-01T16:05:00Z"];
+    let first = scratch.run(&args);
+    first.expect(0);
+    assert_eq!(first.stdout, scratch.run(&args).stdout);
+    let key = "https://github.com/azigler/pinki/ext/promise/v0/promise";
+    let value = &first.json()[key];
+    assert_eq!(value["state"], "overdue");
+    assert_eq!(value["provenance"]["as_of"], "2026-09-01T16:05:00Z");
+    let reference = value["provenance"]["ledger_ref"].as_str().unwrap();
+    assert_eq!(reference.len(), "sha256:".len() + 64);
+
+    let copy = Scratch::new();
+    fs::create_dir_all(copy.ledger().parent().unwrap()).unwrap();
+    fs::copy(scratch.ledger(), copy.ledger()).unwrap();
+    assert_eq!(first.stdout, copy.run(&args).stdout);
+
+    // Even ignored bytes belong to the snapshot identity.
+    writeln!(fs::OpenOptions::new()
+        .append(true)
+        .open(scratch.ledger())
+        .unwrap())
+    .unwrap();
+    let after_blank_line = scratch.run(&args).json();
+    assert_eq!(after_blank_line[key]["state"], "overdue");
+    assert_ne!(after_blank_line[key]["provenance"]["ledger_ref"], reference);
+
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "author"])
+        .expect(0);
+    let changed = scratch.run(&args).json();
+    assert_ne!(
+        changed[key]["provenance"]["ledger_ref"],
+        after_blank_line[key]["provenance"]["ledger_ref"]
+    );
+    assert_eq!(changed[key]["provenance"]["as_of"], "2026-09-01T16:05:00Z");
+    assert_eq!(scratch.run(&["a2a", "task", &id, "--now", "bad"]).code, 2);
+}
+
+#[test]
+fn a2a_task_distinguishes_satisfied_from_open_and_carries_assessment_history() {
+    let scratch = Scratch::new();
+    let open = scratch.promise("still open", "debtor", "creditor", FUTURE);
+    scratch
+        .run(&[
+            "promise",
+            "delivered",
+            "--id",
+            "delivered",
+            "--by",
+            "debtor",
+            "--to",
+            "creditor",
+            "--until",
+            FUTURE,
+            "--ts",
+            "2026-08-28T00:00:00Z",
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "assess",
+            "delivered",
+            "--violated",
+            "--observer",
+            "creditor",
+            "--ts",
+            "2026-08-29T00:00:00Z",
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "resolve",
+            "delivered",
+            "--satisfied",
+            "--evidence",
+            "sha:abc",
+            "--ts",
+            "2026-08-30T00:00:00Z",
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "assess",
+            "delivered",
+            "--retracted",
+            "--observer",
+            "creditor",
+            "--supersedes",
+            "2026-08-29T00:00:00Z",
+            "--ts",
+            "2026-08-31T00:00:00Z",
+        ])
+        .expect(0);
+
+    let key = "https://github.com/azigler/pinki/ext/promise/v0/promise";
+    let open_wire = scratch.run(&["a2a", "task", &open]).json();
+    let satisfied_wire = scratch.run(&["a2a", "task", "delivered"]).json();
+    let open_detail = &open_wire[key];
+    let satisfied = &satisfied_wire[key];
+    assert_ne!(open_detail["state"], satisfied["state"]);
+    assert!(open_detail["resolution"].is_null());
+    assert_eq!(satisfied["state"], "satisfied");
+    assert_eq!(satisfied["source"], "supplied");
+    assert_eq!(satisfied["resolution"]["as"], "satisfied");
+    assert_eq!(satisfied["resolution"]["source"], "supplied");
+    assert_eq!(
+        satisfied["resolution"]["evidence"],
+        serde_json::json!(["sha:abc"])
+    );
+    let assessments = satisfied["assessments"].as_array().unwrap();
+    assert_eq!(assessments[0]["source"], "supplied");
+    assert_eq!(assessments[0]["superseded_by"], "2026-08-31T00:00:00Z");
+    assert_eq!(assessments[0]["after_resolution"], false);
+    assert_eq!(assessments[1]["supersedes"], "2026-08-29T00:00:00Z");
+    assert_eq!(assessments[1]["after_resolution"], true);
+    let mut without_provenance = satisfied.clone();
+    without_provenance
+        .as_object_mut()
+        .unwrap()
+        .remove("provenance");
+    assert_eq!(
+        without_provenance,
+        scratch.run(&["show", "delivered", "--json"]).json()
+    );
 }
 
 #[test]
@@ -3146,7 +3331,7 @@ fn nested_meta_round_trips_through_every_read_surface_byte_for_byte() {
     let rows = ls.json();
     let from_ls = meta_bytes(&rows.as_array().expect("an array")[0]);
 
-    // 4. a2a task — the record verbatim inside the extension block
+    // 4. a2a task — the declaration's meta inside the extension block
     let a2a = scratch.run(&["a2a", "task", &id]);
     a2a.expect(0);
     let block = a2a.json();
@@ -3162,12 +3347,14 @@ fn nested_meta_round_trips_through_every_read_surface_byte_for_byte() {
         assert_eq!(got.as_str(), META, "{surface} did not carry meta verbatim");
     }
 
-    // The A2A block still carries the record and nothing else — meta is part of the
-    // record, not a second key beside it, and no computed state came along.
+    // The A2A block keeps the declaration and its meta under the original key.
     assert_eq!(block.as_object().expect("an object").len(), 1);
-    assert!(record.get("state").is_none());
-    // id, promise, by, to, until, task, meta — this promise has no antecedent.
-    assert_eq!(record.as_object().expect("the record").len(), 7);
+    let mut without_provenance = record.clone();
+    without_provenance
+        .as_object_mut()
+        .unwrap()
+        .remove("provenance");
+    assert_eq!(without_provenance, show.json());
 }
 
 #[test]

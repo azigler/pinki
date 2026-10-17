@@ -13,7 +13,9 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 use crate::record::Promise;
 
 /// The extension URI. Provisional — A2A-EXTENSION.md §6, and DESIGN.md §8's first
@@ -55,14 +57,44 @@ pub fn card() -> Result<String, serde_json::Error> {
 /// The Task **metadata block** for one promise — §Surface 3.
 ///
 /// This is the object you merge into a `Task`'s `metadata`, not a whole `Task`.
-/// pinki has no task `status` and no way to learn one, and a promise with no `task`
-/// field has no Task id to put on a fabricated envelope — emitting either would be
-/// asserting A2A state pinki cannot observe. One key, one value: the §1 record
-/// verbatim.
-pub fn task_metadata(record: &Promise) -> Result<String, serde_json::Error> {
-    let mut block: BTreeMap<String, &Promise> = BTreeMap::new();
-    block.insert(metadata_key(), record);
+/// pinki has no A2A task `status` and no way to learn one, so it emits no fabricated
+/// Task envelope. The value is the same detail read model as `show --json`, with the
+/// declaration still at the same path for older readers. Provenance belongs to
+/// the extension value, not the A2A Task envelope.
+pub fn task_metadata<T: Serialize>(
+    detail: &T,
+    as_of: &str,
+    ledger_ref: &str,
+) -> Result<String, serde_json::Error> {
+    let mut block = BTreeMap::new();
+    block.insert(
+        metadata_key(),
+        TaskValue {
+            detail,
+            provenance: Provenance { as_of, ledger_ref },
+        },
+    );
     serde_json::to_string_pretty(&block)
+}
+
+/// A path-free reference to the exact ledger bytes that supplied the fold.
+/// The same contents in a copied ledger have the same reference.
+pub fn ledger_ref(contents: &str) -> String {
+    let digest = Sha256::digest(contents.as_bytes());
+    format!("sha256:{digest:x}")
+}
+
+#[derive(Serialize)]
+struct TaskValue<'a, T: Serialize> {
+    #[serde(flatten)]
+    detail: &'a T,
+    provenance: Provenance<'a>,
+}
+
+#[derive(Serialize)]
+struct Provenance<'a> {
+    as_of: &'a str,
+    ledger_ref: &'a str,
 }
 
 #[derive(Serialize)]
@@ -124,7 +156,7 @@ mod tests {
 
     #[test]
     fn task_block_is_one_uri_prefixed_key_carrying_the_record() {
-        let json = task_metadata(&record()).unwrap();
+        let json = task_metadata(&record(), "2026-09-01T16:00:00Z", "sha256:abc").unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), 1);
@@ -133,13 +165,17 @@ mod tests {
             key,
             "https://github.com/azigler/pinki/ext/promise/v0/promise"
         );
-        let back: Promise = serde_json::from_value(carried.clone()).unwrap();
+        let mut record_value = carried.clone();
+        assert_eq!(record_value["provenance"]["as_of"], "2026-09-01T16:00:00Z");
+        assert_eq!(record_value["provenance"]["ledger_ref"], "sha256:abc");
+        record_value.as_object_mut().unwrap().remove("provenance");
+        let back: Promise = serde_json::from_value(record_value).unwrap();
         assert_eq!(back, record());
     }
 
     #[test]
     fn task_block_keeps_the_records_field_order() {
-        let json = task_metadata(&record()).unwrap();
+        let json = task_metadata(&record(), "2026-09-01T16:00:00Z", "sha256:abc").unwrap();
         let order: Vec<&str> = ["id", "promise", "by", "to", "on", "until", "task"]
             .into_iter()
             .collect();
@@ -151,14 +187,5 @@ mod tests {
                 .unwrap_or_else(|| panic!("{field} missing or out of order in:\n{json}"));
             cursor += at + needle.len();
         }
-    }
-
-    #[test]
-    fn task_block_carries_no_computed_state() {
-        // A2A-EXTENSION.md §2: `overdue` is never an A2A state, and no computed state
-        // rides the metadata block at all — it carries the record, nothing else.
-        let json = task_metadata(&record()).unwrap();
-        assert!(!json.contains("state"));
-        assert!(!json.contains("overdue"));
     }
 }
