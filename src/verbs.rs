@@ -94,7 +94,7 @@ pub fn run(command: Command) -> Result<(), Fail> {
         Command::Export(args) => export::run(args),
         Command::A2a { command } => match command {
             A2aCommand::Card => a2a_card(),
-            A2aCommand::Task { id } => a2a_task(&id),
+            A2aCommand::Task { id, now } => a2a_task(&id, now.as_deref()),
         },
     }
 }
@@ -394,6 +394,11 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
     // appended while we still have a question about what was asked for.
     let outcome = resolution_from(&args)?;
     let meta = meta_flag(args.meta.as_deref())?;
+    let note = args
+        .note
+        .as_deref()
+        .map(|note| non_blank(note, "--note"))
+        .transpose()?;
 
     let mut events = read_ledger()?;
     let now = now_to_the_second();
@@ -440,6 +445,10 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
         Outcome::Released(reason) => EventBody::released(&args.id, by, reason),
     };
 
+    let mut body = body;
+    if let EventBody::Resolve { note: slot, .. } = &mut body {
+        *slot = note;
+    }
     let event = Event::new(event_ts, body.with_meta(meta)).with_source(source);
     append(&event)?;
     events.push(event);
@@ -1044,6 +1053,8 @@ struct ResolutionJson<'a> {
     evidence: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<&'a str>,
     /// The resolve event's own provenance, handed back exactly as the log holds it.
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<&'a Meta>,
@@ -1090,34 +1101,12 @@ struct AssessmentJson<'a> {
     meta: Option<&'a Meta>,
 }
 
-fn show(args: ShowArgs) -> Result<(), Fail> {
-    let events = read_existing_ledger()?;
-    let now = now_to_the_second();
-    let folded = fold(&events, now);
-    let view = folded
-        .get(&args.id)
-        .ok_or_else(|| unknown_id(&args.id, "show"))?;
-
-    if args.waiters {
-        let allowed: HashSet<&str> = folded.iter().map(PromiseView::id).collect();
-        let visits = folded.walk(&[view.id()], &allowed, false);
-        let waiters = &visits[1..];
-        if args.json {
-            let rows: Vec<WaiterRow> = waiters
-                .iter()
-                .map(|visit| WaiterRow {
-                    row: row(visit.view),
-                    depth: visit.depth,
-                })
-                .collect();
-            println!("{}", encode(&rows)?);
-        } else {
-            print_graph_rows(waiters, &folded);
-        }
-        return Ok(());
-    }
-
+fn detail<'a>(view: &'a PromiseView<'a>) -> Detail<'a> {
     let resolution = view.resolution.and_then(|event| {
+        let note = match &event.body {
+            EventBody::Resolve { note, .. } => note.as_deref(),
+            _ => None,
+        };
         // `kind` and `by` are the same question for all three outcomes — §4 puts them
         // on every resolve — so they come off the accessors; only the payload differs.
         view.resolution_kind().map(|resolution| match resolution {
@@ -1128,6 +1117,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 by: resolution.by(),
                 evidence: Some(evidence.as_slice()),
                 reason: None,
+                note,
                 meta: event.meta(),
             },
             Resolution::Cancelled { reason, .. } => ResolutionJson {
@@ -1137,6 +1127,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 by: resolution.by(),
                 evidence: None,
                 reason: Some(reason.as_str()),
+                note,
                 meta: event.meta(),
             },
             Resolution::Released { reason, .. } => ResolutionJson {
@@ -1146,6 +1137,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 by: resolution.by(),
                 evidence: None,
                 reason: reason.as_deref(),
+                note,
                 meta: event.meta(),
             },
         })
@@ -1212,6 +1204,46 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             _ => None,
         })
         .collect();
+    Detail {
+        record: view.current_record(),
+        ts: view.horizons[0].ts,
+        source: view.horizons[0].source,
+        state: view.state.as_str(),
+        horizons,
+        resolution,
+        corrections,
+        assessments,
+    }
+}
+
+fn show(args: ShowArgs) -> Result<(), Fail> {
+    let events = read_existing_ledger()?;
+    let now = now_to_the_second();
+    let folded = fold(&events, now);
+    let view = folded
+        .get(&args.id)
+        .ok_or_else(|| unknown_id(&args.id, "show"))?;
+
+    if args.waiters {
+        let allowed: HashSet<&str> = folded.iter().map(PromiseView::id).collect();
+        let visits = folded.walk(&[view.id()], &allowed, false);
+        let waiters = &visits[1..];
+        if args.json {
+            let rows: Vec<WaiterRow> = waiters
+                .iter()
+                .map(|visit| WaiterRow {
+                    row: row(visit.view),
+                    depth: visit.depth,
+                })
+                .collect();
+            println!("{}", encode(&rows)?);
+        } else {
+            print_graph_rows(waiters, &folded);
+        }
+        return Ok(());
+    }
+
+    let detail = detail(view);
     // The superseding line's own state, for the text block: "superseded by <ts>
     // (retracted)" says whether the observer corrected itself or withdrew.
     let superseding_state: Vec<Option<&str>> = view
@@ -1226,19 +1258,17 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         .collect();
 
     if args.json {
-        let detail = Detail {
-            record: view.current_record(),
-            ts: view.horizons[0].ts,
-            source: view.horizons[0].source,
-            state: view.state.as_str(),
-            horizons,
-            resolution,
-            corrections,
-            assessments,
-        };
         println!("{}", encode(&detail)?);
         return Ok(());
     }
+
+    let Detail {
+        horizons,
+        resolution,
+        corrections,
+        assessments,
+        ..
+    } = detail;
 
     println!("{}  {}", view.id(), view.state.as_str());
     println!("  promise      {}", view.record.promise);
@@ -1315,6 +1345,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             }
             if let Some(reason) = resolution.reason {
                 println!("    reason     {reason}");
+            }
+            if let Some(note) = resolution.note {
+                println!("    note       {note}");
             }
             if let Some(meta) = resolution.meta {
                 println!("    meta       {}", one_line(meta));
@@ -1411,18 +1444,27 @@ fn a2a_card() -> Result<(), Fail> {
     Ok(())
 }
 
-fn a2a_task(id: &str) -> Result<(), Fail> {
-    let events = read_existing_ledger()?;
-    let folded = fold(&events, now_to_the_second());
+fn a2a_task(id: &str, supplied_now: Option<&str>) -> Result<(), Fail> {
+    let instant = match supplied_now {
+        Some(value) => Timestamp::from_str(value.trim()).map_err(|e| {
+            Fail::Usage(format!(
+                "--now `{value}` is not an ISO-8601 instant with an offset: {e}"
+            ))
+        })?,
+        None => now_to_the_second(),
+    };
+    let now = Timestamp::from_second(instant.as_second()).unwrap_or(instant);
+    let (events, contents) =
+        ledger::read_existing_snapshot().map_err(|e| Fail::Op(e.to_string()))?;
+    let ledger_ref = a2a::ledger_ref(&contents);
+    let folded = fold(&events, now);
     let view = folded.get(id).ok_or_else(|| unknown_id(id, "a2a task"))?;
 
-    // No computed state rides the block. A2A-EXTENSION.md §2: `overdue` is never an
-    // A2A state, and the metadata key carries the record verbatim — with the horizon it
-    // currently has, so a peer computing `now > until` for itself gets the same answer
-    // this ledger does.
+    // Use the same read model as `show --json`. Its `state` is pinki's computed
+    // promise state, not the A2A TaskStatus state.
     println!(
         "{}",
-        a2a::task_metadata(&view.current_record())
+        a2a::task_metadata(&detail(view), &now.to_string(), &ledger_ref)
             .map_err(|e| Fail::Op(format!("could not encode the Task metadata block: {e}")))?
     );
     Ok(())
@@ -1733,6 +1775,7 @@ mod tests {
             released: false,
             evidence: Vec::new(),
             reason: None,
+            note: None,
             by: None,
             meta: None,
         };
@@ -1751,6 +1794,7 @@ mod tests {
             released: false,
             evidence: vec!["   ".into()],
             reason: None,
+            note: None,
             by: None,
             meta: None,
         };
@@ -1767,6 +1811,7 @@ mod tests {
             released: false,
             evidence: Vec::new(),
             reason: None,
+            note: None,
             by: None,
             meta: None,
         };
@@ -1790,6 +1835,7 @@ mod tests {
             released: true,
             evidence: Vec::new(),
             reason: None,
+            note: None,
             by: None,
             meta: None,
         };

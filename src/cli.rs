@@ -155,6 +155,10 @@ pub struct ResolveArgs {
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
+    /// Free text about the resolution. Shown by `show`; never counts as evidence.
+    #[arg(long, value_name = "TEXT")]
+    pub note: Option<String>,
+
     /// Who is claiming this. Defaults to the debtor for --satisfied/--cancelled and
     /// to the creditor for --released. pinki records the claim; it never checks it.
     #[arg(long, value_name = "WHO")]
@@ -352,5 +356,8 @@ pub enum A2aCommand {
     Task {
         /// The promise to carry.
         id: String,
+        /// Compute state as of this ISO-8601 instant. Defaults to the current second.
+        #[arg(long, value_name = "ISO")]
+        now: Option<String>,
     },
 }

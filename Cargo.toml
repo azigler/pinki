@@ -15,9 +15,10 @@ path = "src/main.rs"
 #     "pinki makes no network calls."
 #
 # Nothing listed here can open a socket. clap parses argv, serde and serde_json move
-# structs to and from JSON text, and jiff (default features off) does timestamp
-# arithmetic. There is no HTTP client, no async runtime, no TLS stack, no DNS
-# resolver, and no transitive path to one. The invariant is therefore structural — a
+# structs to and from JSON text, jiff (default features off) does timestamp
+# arithmetic, and sha2 hashes ledger snapshots. There is no HTTP client, async
+# runtime, TLS stack, DNS resolver, or transitive path to one. The invariant is
+# therefore structural — a
 # property of what this binary is linked against — rather than a promise of good
 # behavior by the code above it. A tool that cannot carry a message cannot distort
 # one.
@@ -29,3 +30,4 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
+sha2 = { version = "0.10", default-features = false }
