@@ -37,8 +37,8 @@ printf '%s\n' "$receipt"
 your own id (avoid the reserved `pnk_` prefix; not one already declared).
 Otherwise pinki mints `pnk_` plus six hex digits.
 
-For a historical import, add `--ts ISO` to `promise`, `amend`, `resolve`, or
-`assess`, or put `ts` in a promise record on stdin. The event gets
+For a historical import, add `--ts ISO` to `promise`, `amend`, `resolve`,
+`correct`, or `assess`, or put `ts` in a promise record on stdin. The event gets
 `"source":"supplied"`; without it pinki records `"source":"cli"`. The timestamp
 may be past, but only 300 seconds ahead of the current clock. `show --json` and
 `ls --json` include the declaration `ts`; `show` marks supplied event times.
@@ -52,7 +52,7 @@ may be past, but only 300 seconds ahead of the current clock. `show --json` and
 pinki ls --json
 ```
 
-`show` gives one promise, its current deadline, resolution, and assessments.
+`show` gives one promise, its current deadline, resolution, corrections, and assessments.
 
 ```sh
 pinki show "$id" --json
@@ -91,6 +91,20 @@ prose summary; it appears in `show` and never counts as evidence. Other outcomes
 ```sh
 pinki resolve "$id" --satisfied --evidence https://example.org/reviews/schema-91
 pinki ls --all
+```
+
+If the recorded outcome was wrong, the author of the first resolution can
+correct it. The original resolve stays in the ledger, and `show` and `export`
+include the correction history. Satisfaction still needs an evidence reference.
+
+```sh
+wrong_receipt=$(pinki promise "Ship the review" --by https://example.org/agents/author \
+  --to https://example.org/agents/publisher --until 2030-01-03T00:00:00Z)
+wrong_id=${wrong_receipt%%$'\t'*}
+pinki resolve "$wrong_id" --cancelled --reason "Migration mislabelled the result" \
+  --by https://example.org/agents/author
+pinki correct "$wrong_id" --as satisfied --evidence https://example.org/reviews/schema-91 \
+  --reason "Migration labelled completed work as cancelled" --by https://example.org/agents/author
 ```
 
 `pinki assess ID --violated --observer WHO` publishes an attributed judgment

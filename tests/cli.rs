@@ -1452,6 +1452,272 @@ fn the_first_resolve_wins_and_the_second_appends_nothing() {
 }
 
 #[test]
+fn correction_relabels_the_live_case_and_preserves_both_events_everywhere() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship kept work", "writer", "reviewer", FUTURE);
+    let child = scratch.run(&[
+        "promise",
+        "review kept work",
+        "--id",
+        "child",
+        "--by",
+        "reviewer",
+        "--to",
+        "writer",
+        "--until",
+        FUTURE,
+        "--on",
+        &id,
+    ]);
+    child.expect(0);
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--cancelled",
+            "--reason",
+            "migration mistake",
+            "--by",
+            "writer",
+        ])
+        .expect(0);
+    let before = scratch.lines();
+    scratch
+        .run(&[
+            "correct",
+            &id,
+            "--as",
+            "satisfied",
+            "--evidence",
+            "sha:kept",
+            "--reason",
+            "migration mislabelled kept work",
+            "--by",
+            "writer",
+            "--ts",
+            PAST,
+            "--meta",
+            r#"{"from":"migration"}"#,
+        ])
+        .expect(0);
+    let after = scratch.lines();
+    assert_eq!(
+        &after[..before.len()],
+        before,
+        "correction must only append"
+    );
+    assert_eq!(after.len(), before.len() + 1);
+    let correction: serde_json::Value = serde_json::from_str(after.last().unwrap()).unwrap();
+    assert_eq!(correction["type"], "correct");
+    assert_eq!(correction["source"], "supplied");
+    assert_eq!(correction["as"], "satisfied");
+
+    let show = scratch.run(&["show", &id, "--json"]);
+    show.expect(0);
+    let detail = show.json();
+    assert_eq!(detail["state"], "satisfied");
+    assert_eq!(detail["resolution"]["as"], "cancelled");
+    assert_eq!(detail["resolution"]["reason"], "migration mistake");
+    assert_eq!(detail["resolution"]["by"], "writer");
+    assert_eq!(detail["resolution"]["source"], "cli");
+    assert_eq!(detail["corrections"][0]["as"], "satisfied");
+    assert_eq!(detail["corrections"][0]["by"], "writer");
+    assert_eq!(detail["corrections"][0]["ts"], PAST);
+    assert_eq!(detail["corrections"][0]["source"], "supplied");
+    assert_eq!(
+        detail["corrections"][0]["reason"],
+        "migration mislabelled kept work"
+    );
+    assert_eq!(detail["corrections"][0]["evidence"][0], "sha:kept");
+    assert_eq!(detail["corrections"][0]["meta"]["from"], "migration");
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(text.stdout.contains("resolution   cancelled"));
+    assert!(text.stdout.contains("corrections\n"));
+    assert!(text.stdout.contains("sha:kept"));
+
+    let listed = scratch.run(&["ls", "--all", "--json"]);
+    listed.expect(0);
+    let rows = listed.json();
+    assert_eq!(rows[0]["state"], "satisfied");
+    assert_eq!(
+        rows[1]["state"], "detached",
+        "dependent sees corrected state"
+    );
+    let tree = scratch.run(&["ls", "--all", "--tree", "--json"]);
+    tree.expect(0);
+    assert_eq!(tree.json()[0]["state"], "satisfied");
+    assert_eq!(tree.json()[0]["children"][0]["state"], "detached");
+
+    let exported = scratch.run(&["export", "--now", EXPORT_NOW]);
+    exported.expect(0);
+    let document = exported.json();
+    let promise = document["promises"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|promise| promise["id"] == id)
+        .unwrap();
+    assert_eq!(document["version"], 1);
+    assert_eq!(promise["state"], "satisfied");
+    assert_eq!(promise["resolution"]["as"], "cancelled");
+    assert_eq!(promise["corrections"][0]["as"], "satisfied");
+    assert_eq!(promise["corrections"][0]["source"], "supplied");
+    assert_eq!(promise["corrections"][0]["meta"]["from"], "migration");
+    let jsonl = scratch.run(&["export", "--format", "jsonl", "--now", EXPORT_NOW]);
+    jsonl.expect(0);
+    let rows: Vec<serde_json::Value> = jsonl
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows, *document["promises"].as_array().unwrap());
+}
+
+#[test]
+fn correction_refusals_and_no_op_leave_the_ledger_unchanged() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship work", "writer", "reviewer", FUTURE);
+    let unresolved = scratch.lines();
+    let run = scratch.run(&[
+        "correct",
+        &id,
+        "--as",
+        "cancelled",
+        "--reason",
+        "wrong",
+        "--by",
+        "writer",
+    ]);
+    run.expect(1);
+    assert!(run.stderr.contains("unresolved"));
+    assert_eq!(scratch.lines(), unresolved);
+
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--cancelled",
+            "--reason",
+            "mistake",
+            "--by",
+            "writer",
+        ])
+        .expect(0);
+    let resolved = scratch.lines();
+    let other = scratch.run(&[
+        "correct", &id, "--as", "released", "--reason", "wrong", "--by", "other",
+    ]);
+    other.expect(1);
+    assert!(other.stderr.contains("only `writer`"));
+    assert!(other.stderr.contains("§4"));
+    assert_eq!(scratch.lines(), resolved);
+
+    let same = scratch.run(&[
+        "correct",
+        &id,
+        "--as",
+        "cancelled",
+        "--reason",
+        "same",
+        "--by",
+        "writer",
+    ]);
+    same.expect(0);
+    assert!(same.stdout.contains("no-op"));
+    assert_eq!(scratch.lines(), resolved);
+
+    let missing_evidence = scratch.run(&[
+        "correct",
+        &id,
+        "--as",
+        "satisfied",
+        "--reason",
+        "kept",
+        "--by",
+        "writer",
+    ]);
+    missing_evidence.expect(2);
+    assert!(missing_evidence.stderr.contains("--evidence REF"));
+    assert_eq!(scratch.lines(), resolved);
+
+    let future = scratch.run(&[
+        "correct", &id, "--as", "released", "--reason", "fixed", "--by", "writer", "--ts", FUTURE,
+    ]);
+    future.expect(2);
+    assert!(future.stderr.contains("300 seconds of clock skew"));
+    assert_eq!(scratch.lines(), resolved);
+}
+
+#[test]
+fn fold_ignores_foreign_corrections_and_uses_latest_authorized_log_line() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship work", "writer", "reviewer", FUTURE);
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--cancelled",
+            "--reason",
+            "bad migration",
+            "--by",
+            "writer",
+        ])
+        .expect(0);
+    let foreign = format!(
+        "{{\"ts\":\"{PAST}\",\"type\":\"correct\",\"promise\":\"{id}\",\"as\":\"released\",\"by\":\"other\",\"reason\":\"foreign\"}}\n"
+    );
+    fs::OpenOptions::new()
+        .append(true)
+        .open(scratch.ledger())
+        .unwrap()
+        .write_all(foreign.as_bytes())
+        .unwrap();
+    assert_eq!(
+        scratch.run(&["show", &id, "--json"]).json()["state"],
+        "cancelled"
+    );
+    assert_eq!(
+        scratch.run(&["show", &id, "--json"]).json()["corrections"][0]["by"],
+        "other"
+    );
+
+    scratch
+        .run(&[
+            "correct",
+            &id,
+            "--as",
+            "satisfied",
+            "--reason",
+            "work shipped",
+            "--evidence",
+            "sha:done",
+            "--by",
+            "writer",
+            "--ts",
+            PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "correct",
+            &id,
+            "--as",
+            "released",
+            "--reason",
+            "released later",
+            "--by",
+            "writer",
+        ])
+        .expect(0);
+    let detail = scratch.run(&["show", &id, "--json"]).json();
+    assert_eq!(detail["state"], "released");
+    assert_eq!(detail["corrections"].as_array().unwrap().len(), 3);
+    assert_eq!(detail["corrections"][1]["ts"], PAST);
+    assert_eq!(detail["corrections"][2]["as"], "released");
+}
+
+#[test]
 fn resolving_an_unknown_id_fails_operationally() {
     let scratch = Scratch::new();
     let run = scratch.run(&[
@@ -2925,6 +3191,51 @@ fn a2a_task_emits_the_metadata_block_for_one_promise() {
     assert_eq!(
         without_provenance,
         scratch.run(&["show", &b, "--json"]).json()
+    );
+}
+
+#[test]
+fn a2a_task_carries_corrected_state_and_correction_history() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("deliver the report", "writer", "reader", FUTURE);
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--cancelled",
+            "--reason",
+            "reported in error",
+            "--by",
+            "writer",
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "correct",
+            &id,
+            "--as",
+            "satisfied",
+            "--evidence",
+            "sha:delivered",
+            "--reason",
+            "report was delivered",
+            "--by",
+            "writer",
+        ])
+        .expect(0);
+
+    let block = scratch.run(&["a2a", "task", &id]);
+    block.expect(0);
+    let record = &block.json()["https://github.com/azigler/pinki/ext/promise/v0/promise"];
+    assert_eq!(record["state"], "satisfied");
+    assert_eq!(record["resolution"]["as"], "cancelled");
+    let corrections = record["corrections"].as_array().unwrap();
+    assert_eq!(corrections.len(), 1);
+    assert_eq!(corrections[0]["as"], "satisfied");
+    assert_eq!(corrections[0]["reason"], "report was delivered");
+    assert_eq!(
+        corrections[0]["evidence"],
+        serde_json::json!(["sha:delivered"])
     );
 }
 

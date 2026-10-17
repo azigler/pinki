@@ -1,7 +1,8 @@
-//! The log's four event types — DESIGN.md §4.
+//! The log's five event types — DESIGN.md §4.
 //!
 //! Append-only JSONL. `promise` speaks an obligation into existence, `amend` moves its
-//! horizon without rewriting anything, `resolve` ends one, and `assess` publishes
+//! horizon without rewriting anything, `resolve` ends one, `correct` relabels its
+//! outcome, and `assess` publishes
 //! somebody's judgment about one. State is a fold over these (see [`crate::state`]);
 //! nothing here stores a state.
 //!
@@ -18,8 +19,8 @@
 //!
 //! - in a **`promise`** event, `id` is the promise's id and `promise` is the free
 //!   text of the thing owed;
-//! - in an **`amend`**, **`resolve`** or **`assess`** event, `promise` is the **id
-//!   being amended, resolved or assessed**.
+//! - in an **`amend`**, **`resolve`**, **`correct`** or **`assess`** event, `promise` is the **id
+//!   being amended, resolved, corrected or assessed**.
 //!
 //! It reads correctly in both places — "the promise" is the text when you are
 //! speaking it and the referent when you are pointing at it — and the log is the
@@ -27,7 +28,7 @@
 //!
 //! ## `meta` rides every event, and none of them are read
 //!
-//! §1's open door is not only the record's. An `amend`, a `resolve` and an `assess`
+//! §1's open door is not only the record's. An `amend`, `resolve`, `correct` and `assess`
 //! carry their own provenance in an adopting system — which component moved this
 //! horizon, which resolved it, on whose behalf, citing what — so every event type may
 //! carry a `meta` object, attached the one way, through [`EventBody::with_meta`], and
@@ -91,12 +92,13 @@ impl Event {
     }
 
     /// The promise id this event is about — the record's `id` for a `promise` event,
-    /// the referenced id for `amend`, `resolve` and `assess`.
+    /// the referenced id for `amend`, `resolve`, `correct` and `assess`.
     pub fn subject(&self) -> &str {
         match &self.body {
             EventBody::Promise(p) => &p.id,
             EventBody::Amend { promise, .. }
             | EventBody::Resolve { promise, .. }
+            | EventBody::Correct { promise, .. }
             | EventBody::Assess { promise, .. } => promise,
             // An event this build cannot read is an event whose subject it cannot read
             // either. The empty string is no id — it matches nothing and reserves
@@ -120,6 +122,7 @@ impl Event {
             EventBody::Promise(p) => p.meta.as_ref(),
             EventBody::Amend { meta, .. }
             | EventBody::Resolve { meta, .. }
+            | EventBody::Correct { meta, .. }
             | EventBody::Assess { meta, .. } => meta.as_ref(),
             // An event this build cannot read is one whose `meta` it cannot locate
             // either — the body was dropped at parse time, so there is nothing to hand
@@ -174,6 +177,18 @@ pub enum EventBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<Meta>,
     },
+    /// Relabels the winning resolution without replacing its log line.
+    Correct {
+        promise: String,
+        #[serde(rename = "as")]
+        outcome: CorrectAs,
+        by: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Meta>,
+    },
     /// Publishes an assessment. Never terminal: §4 — "an assessed promise stays
     /// exactly as open as it was."
     Assess {
@@ -221,13 +236,14 @@ impl EventBody {
     /// Attach opaque provenance — the one way `meta` gets onto any event.
     ///
     /// A `promise` event's `meta` is the record's field, and an `amend`/`resolve`/
-    /// `assess` event's is its own; one method rather than four so "every event may
+    /// `correct`/`assess` event's is its own; one method so "every event may
     /// carry meta" is a single statement in the code as well as in §4.
     pub fn with_meta(mut self, meta: Option<Meta>) -> Self {
         match &mut self {
             EventBody::Promise(record) => record.meta = meta,
             EventBody::Amend { meta: slot, .. }
             | EventBody::Resolve { meta: slot, .. }
+            | EventBody::Correct { meta: slot, .. }
             | EventBody::Assess { meta: slot, .. } => *slot = meta,
             // Nothing is ever attached to a line this build could not read: pinki does
             // not rewrite a line it read, and an `Unknown` body is never serialized.
@@ -309,6 +325,23 @@ impl EventBody {
         }
     }
 
+    pub fn correction(
+        promise: impl Into<String>,
+        outcome: CorrectAs,
+        by: impl Into<String>,
+        reason: impl Into<String>,
+        evidence: Option<Vec<String>>,
+    ) -> Self {
+        EventBody::Correct {
+            promise: promise.into(),
+            outcome,
+            by: by.into(),
+            reason: reason.into(),
+            evidence,
+            meta: None,
+        }
+    }
+
     /// An `assess` event publishing [`VIOLATED`], superseding nothing. The tests' and
     /// examples' shorthand; the verb builds every assessment through
     /// [`EventBody::assessment`].
@@ -337,6 +370,25 @@ impl EventBody {
             note,
             supersedes,
             meta: None,
+        }
+    }
+}
+
+/// The three terminal outcomes a correction may assign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CorrectAs {
+    Satisfied,
+    Cancelled,
+    Released,
+}
+
+impl CorrectAs {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Satisfied => "satisfied",
+            Self::Cancelled => "cancelled",
+            Self::Released => "released",
         }
     }
 }
