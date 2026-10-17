@@ -229,6 +229,11 @@ going green, a human replying — someone promises it. That keeps the graph clos
 keeps the record count at one, and means pinki never needs an event bus, a webhook
 receiver, or a condition language.
 
+`ls --tree` reads the folded `on` edges as a forest. `show ID --waiters` reads
+the reverse edge transitively. Both use the fold's computed states; neither
+adds a state or changes the record. An unknown antecedent leaves its dependent
+at a marked root until that id appears in the ledger.
+
 ---
 
 ## 3. The states
@@ -516,8 +521,8 @@ pinki assess  pnk_88de10 --violated --observer author --note "nothing shipped"
 pinki assess  pnk_88de10 --retracted --observer author --supersedes 2026-09-02T09:00:00Z \
       [--note "the work shipped; I missed it"]
 
-pinki ls    [--open|--overdue|--all] [--by X] [--to Y] [--json]
-pinki show  pnk_4f3a91 [--json]
+pinki ls    [--open|--overdue|--all] [--by X] [--to Y] [--tree] [--json]
+pinki show  pnk_4f3a91 [--waiters] [--json]
 pinki export [--format json|jsonl] [--state STATE]... [--debtor URI] [--creditor URI] \
       [--since ISO] [--now ISO]
 
@@ -532,6 +537,14 @@ both and shown by `--all`. Both `ls` and `show` print the **current** horizon in
 `until`; `show` additionally lists every horizon the promise has had, declaration
 first, once there is more than one.
 
+`ls --tree` applies the usual `ls` filters before arranging rows. If a filter
+hides an antecedent, its visible dependent starts a root in that filtered
+view. Tree JSON nests rows under `children` and marks a missing antecedent with
+`unknown_antecedent`. `show --waiters` prints the transitive dependents, not
+the named promise; its JSON is a flat array with `depth` starting at 1.
+If a later declaration completes a cycle, the forest starts that component at
+its first declared promise and prints each promise once.
+
 `export` is a read-only projection for viewers, not a new source of state. JSON is
 one `{"format":"pinki-export","version":1,"summary":…, "promises":[…]}` document;
 the summary counts the selected promises by each computed state, including zeros.
@@ -545,6 +558,15 @@ declaration time then id, with amendment and assessment arrays ordered by event 
 time is used as in `ls` and `show`. The local ledger path is omitted so a copied
 ledger produces the same bytes. An assessment remains an attributed speech act, never
 a computed `violated` state.
+
+The version 1 assessment object also carries `supersedes` (the earlier line's `ts`)
+and `superseded_by` (the replacing line's `ts`) when those relations exist. It carries
+`after_resolution: true` when the assessment follows the winning resolution in log
+order (§4). Absent `after_resolution` means false. These are optional additions to
+the existing version 1 promise shape: readers that use its original fields still
+read it, and a ledger with no supersede or post-resolution assessment exports the
+same bytes as before. The export only reports the fold's relations; it does not
+choose a winning judgment (§3, §7).
 
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
 explicit one that disagrees. `--reason` is encouraged, not required: an escalation

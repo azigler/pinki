@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use jiff::Timestamp;
@@ -192,6 +192,13 @@ impl<'a> PromiseView<'a> {
 pub struct Fold<'a> {
     order: Vec<&'a str>,
     views: HashMap<&'a str, PromiseView<'a>>,
+    children: HashMap<&'a str, Vec<&'a str>>,
+}
+
+/// One visit to the folded `on` graph. Depth zero is a supplied root.
+pub struct GraphVisit<'f, 'a> {
+    pub view: &'f PromiseView<'a>,
+    pub depth: usize,
 }
 
 impl<'a> Fold<'a> {
@@ -219,6 +226,44 @@ impl<'a> Fold<'a> {
     /// The state of one promise, or `None` if it was never declared.
     pub fn state(&self, id: &str) -> Option<State> {
         self.get(id).map(|view| view.state)
+    }
+
+    /// Walk the reverse `on` edges in declaration order, using the fold's views and
+    /// child index. `allowed` can project a filtered forest; a hidden parent is then
+    /// a boundary rather than a route to hidden descendants. For a forest, also
+    /// start any unreached component: the CLI permits an unknown antecedent, so a
+    /// later declaration can complete a cycle. A visited set keeps that finite.
+    pub fn walk(
+        &self,
+        roots: &[&'a str],
+        allowed: &HashSet<&str>,
+        include_unreached: bool,
+    ) -> Vec<GraphVisit<'_, 'a>> {
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+        let extra = if include_unreached {
+            self.order.as_slice()
+        } else {
+            &[]
+        };
+        for &start in roots.iter().chain(extra) {
+            if !allowed.contains(start) || seen.contains(start) {
+                continue;
+            }
+            let mut stack = vec![(start, 0)];
+            while let Some((id, depth)) = stack.pop() {
+                if !allowed.contains(id) || !seen.insert(id) {
+                    continue;
+                }
+                if let Some(view) = self.get(id) {
+                    result.push(GraphVisit { view, depth });
+                    if let Some(children) = self.children.get(id) {
+                        stack.extend(children.iter().rev().map(|child| (*child, depth + 1)));
+                    }
+                }
+            }
+        }
+        result
     }
 }
 
@@ -390,7 +435,18 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
         })
         .collect();
 
-    Fold { order, views }
+    let mut children: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
+    for &id in &order {
+        if let Some(on) = records.get(id).and_then(|record| record.on.as_deref()) {
+            children.entry(on).or_default().push(id);
+        }
+    }
+
+    Fold {
+        order,
+        views,
+        children,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

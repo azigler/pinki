@@ -1855,6 +1855,142 @@ fn an_ambiguous_or_already_superseded_reference_is_refused() {
 // ---------------------------------------------------------------------- ls
 
 #[test]
+fn graph_reads_three_levels_in_both_directions_with_folded_states() {
+    let scratch = Scratch::new();
+    for (id, on) in [
+        ("root", None),
+        ("middle", Some("root")),
+        ("leaf", Some("middle")),
+    ] {
+        let mut args = vec![
+            "promise", id, "--id", id, "--by", "debtor", "--to", "creditor", "--until", FUTURE,
+        ];
+        if let Some(on) = on {
+            args.extend(["--on", on]);
+        }
+        scratch.run(&args).expect(0);
+    }
+    scratch
+        .run(&[
+            "resolve",
+            "root",
+            "--satisfied",
+            "--evidence",
+            "https://example.org/root",
+        ])
+        .expect(0);
+
+    let tree_text = scratch.run(&["ls", "--tree", "--all"]);
+    tree_text.expect(0);
+    let lines: Vec<&str> = tree_text.stdout.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].starts_with("root  satisfied"), "{lines:?}");
+    assert!(lines[1].starts_with("  middle  detached"), "{lines:?}");
+    assert!(lines[2].starts_with("    leaf  conditional"), "{lines:?}");
+
+    let tree = scratch.run(&["ls", "--tree", "--all", "--json"]);
+    tree.expect(0);
+    let json = tree.json();
+    let roots = json.as_array().expect("a forest");
+    assert_eq!(roots.len(), 1);
+    let root = &roots[0];
+    let middle = &root["children"][0];
+    let leaf = &middle["children"][0];
+    assert_eq!(root["id"], "root");
+    assert_eq!(middle["id"], "middle");
+    assert_eq!(leaf["id"], "leaf");
+    assert_eq!(leaf["children"], serde_json::json!([]));
+    for node in [root, middle, leaf] {
+        assert_eq!(
+            node["state"],
+            state_of(&scratch, node["id"].as_str().unwrap())
+        );
+    }
+
+    let waiter_text = scratch.run(&["show", "root", "--waiters"]);
+    waiter_text.expect(0);
+    let lines: Vec<&str> = waiter_text.stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("  middle  detached"), "{lines:?}");
+    assert!(lines[1].starts_with("    leaf  conditional"), "{lines:?}");
+    let waiters = scratch.run(&["show", "root", "--waiters", "--json"]);
+    waiters.expect(0);
+    let waiters = waiters.json();
+    assert_eq!(waiters[0]["id"], "middle");
+    assert_eq!(waiters[0]["depth"], 1);
+    assert_eq!(waiters[1]["id"], "leaf");
+    assert_eq!(waiters[1]["depth"], 2);
+    assert_eq!(waiters.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn tree_marks_an_unknown_antecedent_as_a_root() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&[
+            "promise",
+            "first",
+            "--id",
+            "orphan",
+            "--by",
+            "debtor",
+            "--to",
+            "creditor",
+            "--until",
+            FUTURE,
+            "--on",
+            "not-in-this-ledger",
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "promise", "second", "--id", "child", "--by", "debtor", "--to", "creditor", "--until",
+            FUTURE, "--on", "orphan",
+        ])
+        .expect(0);
+
+    let text = scratch.run(&["ls", "--tree"]);
+    text.expect(0);
+    assert!(text
+        .stdout
+        .lines()
+        .next()
+        .unwrap()
+        .starts_with("orphan  conditional"));
+    assert!(text
+        .stdout
+        .contains("[unknown antecedent: not-in-this-ledger]"));
+    assert!(text.stdout.contains("\n  child  conditional"));
+    let json = scratch.run(&["ls", "--tree", "--json"]);
+    json.expect(0);
+    let json = json.json();
+    assert_eq!(json[0]["id"], "orphan");
+    assert_eq!(json[0]["unknown_antecedent"], "not-in-this-ledger");
+    assert_eq!(json[0]["children"][0]["id"], "child");
+}
+
+#[test]
+fn tree_keeps_a_cycle_that_a_later_declaration_completed() {
+    let scratch = Scratch::new();
+    for (id, on) in [("first", "second"), ("second", "first")] {
+        scratch
+            .run(&[
+                "promise", id, "--id", id, "--by", "debtor", "--to", "creditor", "--until", FUTURE,
+                "--on", on,
+            ])
+            .expect(0);
+    }
+    let tree = scratch.run(&["ls", "--tree", "--all", "--json"]);
+    tree.expect(0);
+    let json = tree.json();
+    assert_eq!(json[0]["id"], "first");
+    assert_eq!(json[0]["state"], "conditional");
+    assert_eq!(json[0]["children"][0]["id"], "second");
+    assert_eq!(json[0]["children"][0]["state"], "conditional");
+    assert_eq!(json[0]["children"][0]["children"], serde_json::json!([]));
+}
+
+#[test]
 fn ls_on_an_empty_ledger_is_an_empty_array() {
     let scratch = Scratch::new();
     scratch.touch();
@@ -3572,6 +3708,88 @@ fn export_carries_the_full_history_and_provenance_in_both_formats() {
         "JSONL has the same promise objects, no summary line"
     );
     assert_eq!(scratch.lines(), before, "export never appends");
+}
+
+#[test]
+fn export_carries_supersede_and_post_resolution_assessments_in_both_formats() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("ship the schema", "debtor", "creditor", FUTURE);
+    scratch
+        .run(&["assess", &id, "--violated", "--observer", "watchdog"])
+        .expect(0);
+    scratch.rewrite(|n, event| {
+        if n == 1 {
+            event.insert("ts".into(), "2026-01-01T00:00:00Z".into());
+        }
+    });
+    let prior = assessment_ts(&scratch, &id, 0);
+    scratch
+        .run(&["resolve", &id, "--satisfied", "--evidence", "sha:9c1f0e"])
+        .expect(0);
+    scratch
+        .run(&[
+            "assess",
+            &id,
+            "--retracted",
+            "--observer",
+            "watchdog",
+            "--supersedes",
+            &prior,
+        ])
+        .expect(0);
+    let later = assessment_ts(&scratch, &id, 1);
+    let ledger = scratch.lines();
+
+    let json = scratch.run(&["export", "--now", EXPORT_NOW]);
+    json.expect(0);
+    let document = json.json();
+    assert_eq!(document["version"], 1);
+    let assessments = &document["promises"][0]["assessments"];
+    assert_eq!(assessments.as_array().unwrap().len(), 2);
+    assert_eq!(assessments[0]["state"], "violated");
+    assert_eq!(assessments[0]["superseded_by"], later);
+    assert!(assessments[0].get("supersedes").is_none());
+    assert!(assessments[0].get("after_resolution").is_none());
+    assert_eq!(assessments[1]["state"], "retracted");
+    assert_eq!(assessments[1]["supersedes"], prior);
+    assert!(assessments[1].get("superseded_by").is_none());
+    assert_eq!(assessments[1]["after_resolution"], true);
+
+    let jsonl = scratch.run(&["export", "--format", "jsonl", "--now", EXPORT_NOW]);
+    jsonl.expect(0);
+    let rows: Vec<serde_json::Value> = jsonl
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows, *document["promises"].as_array().unwrap());
+    assert_eq!(scratch.lines(), ledger, "export never appends");
+}
+
+#[test]
+fn export_of_an_old_ledger_keeps_its_exact_v1_bytes() {
+    let scratch = Scratch::new();
+    scratch.touch();
+    fs::write(
+        scratch.ledger(),
+        concat!(
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"promise\",\"id\":\"old\",\"promise\":\"ship\",\"by\":\"a\",\"to\":\"b\",\"until\":\"2099-01-01T00:00:00Z\"}\n",
+            "{\"ts\":\"2026-01-02T00:00:00Z\",\"type\":\"assess\",\"promise\":\"old\",\"state\":\"violated\",\"observer\":\"watchdog\"}\n",
+        ),
+    )
+    .unwrap();
+    let before = scratch.lines();
+
+    let json = scratch.run(&["export", "--now", EXPORT_NOW]);
+    json.expect(0);
+    assert_eq!(
+        json.stdout,
+        concat!(
+            "{\"format\":\"pinki-export\",\"version\":1,\"summary\":{\"total\":1,\"states\":{\"cancelled\":0,\"conditional\":0,\"detached\":1,\"expired\":0,\"overdue\":0,\"released\":0,\"satisfied\":0}},",
+            "\"promises\":[{\"id\":\"old\",\"promise\":\"ship\",\"by\":\"a\",\"to\":\"b\",\"until\":\"2099-01-01T00:00:00Z\",\"original_until\":\"2099-01-01T00:00:00Z\",\"amendments\":[],\"state\":\"detached\",\"resolution\":null,\"assessments\":[{\"state\":\"violated\",\"observer\":\"watchdog\",\"at\":\"2026-01-02T00:00:00Z\"}],\"created_at\":\"2026-01-01T00:00:00Z\"}]}\n",
+        )
+    );
+    assert_eq!(scratch.lines(), before);
 }
 
 #[test]
