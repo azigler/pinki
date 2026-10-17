@@ -167,6 +167,9 @@ pub enum EventBody {
         promise: String,
         #[serde(flatten)]
         resolution: Resolution,
+        /// A prose note about the resolution, never evidence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
         /// Opaque provenance for the act of resolving — never for the promise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<Meta>,
@@ -266,6 +269,7 @@ impl EventBody {
                 by: by.into(),
                 evidence,
             },
+            note: None,
             meta: None,
         }
     }
@@ -282,6 +286,7 @@ impl EventBody {
                 by: by.into(),
                 reason: reason.into(),
             },
+            note: None,
             meta: None,
         }
     }
@@ -299,6 +304,7 @@ impl EventBody {
                 by: by.into(),
                 reason,
             },
+            note: None,
             meta: None,
         }
     }

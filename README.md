@@ -84,7 +84,8 @@ The debtor can move the deadline. pinki keeps each earlier deadline in the ledge
 pinki amend "$id" --until 2030-01-02T00:00:00Z --reason "Review needs another day"
 ```
 
-Resolve with a reference that the other agent can inspect. Other outcomes are
+Resolve with a reference that the other agent can inspect. Add `--note TEXT` for a
+prose summary; it appears in `show` and never counts as evidence. Other outcomes are
 `--cancelled --reason TEXT` and `--released` (by the creditor).
 
 ```sh
@@ -153,9 +154,17 @@ pinki a2a task "$id"
 {"https://github.com/azigler/pinki/ext/promise/v0/promise": {"id": "pnk_4f3a91",
   "promise": "Review the schema",
   "by": "https://example.org/agents/reviewer", "to": "https://example.org/agents/author",
-  "until": "2030-01-02T00:00:00Z", "task": "a2a-task-91"
+  "until": "2030-01-02T00:00:00Z", "task": "a2a-task-91",
+  "ts": "2026-08-28T20:14:03Z", "source": "cli", "state": "satisfied",
+  "horizons": [{"ts":"2026-08-28T20:14:03Z","source":"cli","until":"2030-01-01T00:00:00Z","by":"https://example.org/agents/reviewer"},
+               {"ts":"2026-08-29T12:00:00Z","source":"cli","until":"2030-01-02T00:00:00Z","by":"https://example.org/agents/reviewer","reason":"Review needs another day"}],
+  "resolution": {"as":"satisfied","ts":"2026-08-30T12:00:00Z","source":"cli","by":"https://example.org/agents/reviewer","evidence":["https://example.org/reviews/schema-91"]},
+  "assessments": []
 }}
 ```
+
+These are pinki promise fields, not A2A Task status. The declaration stays at the
+same path. An open promise has a computed open `state` and `resolution: null`.
 
 `pinki a2a` writes JSON to stdout; your A2A client sends it. pinki makes no network calls.
 

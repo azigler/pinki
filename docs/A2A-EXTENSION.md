@@ -96,12 +96,11 @@ routes custom attributes there, with URI-prefixed keys — shown by example
 (`"https://example.com/ext/konami-code/v1/code": "motherlode"`) rather than mandated
 in normative language. pinki follows the convention.
 
-On a `Task` whose work a promise is about:
+On a `Task` whose work a promise is about (excerpt showing the metadata block):
 
 ```json
 {
   "id": "a2a-task-9c1f0e",
-  "status": { "state": "TASK_STATE_WORKING", "timestamp": "2026-08-28T20:14:03Z" },
   "metadata": {
     "https://github.com/azigler/pinki/ext/promise/v0/promise": {
       "id":      "pnk_4f3a91",
@@ -110,27 +109,38 @@ On a `Task` whose work a promise is about:
       "to":      "https://example.org/agents/author",
       "on":      "pnk_0c2b77",
       "until":   "2026-09-01T17:00:00Z",
-      "task":    "a2a-task-9c1f0e"
+      "task":    "a2a-task-9c1f0e",
+      "ts":      "2026-08-28T20:14:03Z",
+      "state":   "satisfied",
+      "horizons": [{"ts":"2026-08-28T20:14:03Z","until":"2026-09-01T17:00:00Z","by":"https://example.org/agents/reviewer"}],
+      "resolution": {"as":"satisfied","ts":"2026-09-01T16:02:11Z","by":"https://example.org/agents/reviewer","evidence":["https://example.org/reviews/91"]},
+      "assessments": []
     }
   }
 }
 ```
 
-One key, one value: the promise record verbatim, exactly as
-[DESIGN.md § 1](DESIGN.md#1-the-record) defines it. At most one promise per Task
-under this extension.
-After an `amend`, `pinki a2a task` carries the current `until` in that record.
+One key, one value. The declaration fields remain at the same path, and `pinki
+a2a task` adds the same computed read fields as `show --json`: `ts`, optional
+timestamp `source`, `state`, `horizons`, `resolution`, and `assessments`. An open
+promise has `resolution: null`; a satisfied one carries its resolution and evidence.
+The `state` here is pinki's computed promise state, **not** `TaskStatus.state`.
+The optional `source` on the declaration, horizons, resolution, and assessments
+uses the same names and values as `show --json`. At most one promise per Task
+rides under this extension. After an `amend`, the declaration's `until` here is
+the current horizon.
 
 The record may also carry `meta`: an optional, opaque object that the declaring
 system uses for its own provenance
 ([DESIGN.md § 1](DESIGN.md#1-the-record)). It rides the metadata block along with
-everything else, because the block is the record verbatim and `meta` is part of the
+everything else, because the declaration stays in place and `meta` is part of the
 record. **A reader of this extension must not interpret it, and must not require
 it** — treat an absent `meta` as "nothing was supplied", never as a conformance
 failure, and treat a present one as bytes belonging to somebody else's system. It is
 not a place to smuggle in extension semantics: anything this specification actually
 means belongs in this specification, under this URI, where a second implementer can
-read it.
+read it. Resolution and assessment events may carry their own `meta` in their read
+objects; those objects are opaque too.
 
 `promise.task` and `Task.id` are the same value seen from both ends. The redundancy
 is deliberate — a promise record handed to you on its own still says what it was
@@ -153,7 +163,7 @@ No new `TaskState` is introduced. The enum is closed at nine values
 | `released` | `CANCELED` | `TaskStatus.message` naming the creditor who released it. |
 | `expired` | *(no mapping)* | The antecedent never held; usually no Task was created. |
 | `overdue` | **no state change** | Computed by readers from `until`. See below. |
-| `violated` | **never a task state** | An assessment. See [§3](#3-assessments-do-not-ride-a2a). |
+| `violated` | **never a task state** | An assessment. See [§3](#3-assessments-ride-as-attributed-history). |
 
 Spell state names in whichever form your transport binding uses — the proto's
 `TASK_STATE_COMPLETED` and the JSON binding's shorter form denote the same value.
@@ -174,12 +184,14 @@ produces *no* A2A state change at all. The task stays exactly as open as it was,
 `now > until` is arithmetic any reader performs for itself. Nobody has to be trusted
 to report it, and nobody can suppress it.
 
-## 3. Assessments do not ride A2A
+## 3. Assessments ride as attributed history
 
-`violated` never appears on a Task, in `metadata`, or anywhere in the A2A message
-flow. It is not a fact about the task; it is one agent's judgment about another
-agent's conduct, and putting it in the shared record would let whoever writes last
-win an argument that has no referee.
+`pinki a2a task` includes the ledger's assessments in `metadata` under the same
+extension URI. Each entry keeps the `show --json` names: `ts`, optional `source`,
+`state`, `observer`, optional `note` and `supersedes`, `superseded_by` (or `null`),
+`after_resolution`, and optional `meta`. `violated` is an attributed judgment, never
+a `TaskStatus.state` or a computed promise state. The array keeps conflicting
+judgments and superseded lines in log order; the last writer does not win.
 
 Assessments live on the assessing agent's own ledger, optionally advertised through
 `params.assessments` on its card ([Surface 1](#surface-1-the-agentcard-declaration)).
@@ -210,7 +222,8 @@ An agent conforms if it:
 3. Attaches ≥1 `Artifact` when completing a Task that carries a promise.
 4. Puts a non-empty reason in `TaskStatus.message` when rejecting or cancelling one.
 5. Never enters a task state to signal that a deadline passed.
-6. Never writes an assessment into a Task.
+6. Keeps assessments attributed in the extension metadata, without mapping their
+   judgments onto `TaskStatus.state`.
 
 Conformance is unenforceable and deliberately so. Nothing in pinki can compel any of
 this, and an agent that ignores every rule here will not be stopped — it will only be

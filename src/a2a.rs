@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+#[cfg(test)]
 use crate::record::Promise;
 
 /// The extension URI. Provisional — A2A-EXTENSION.md §6, and DESIGN.md §8's first
@@ -55,13 +56,12 @@ pub fn card() -> Result<String, serde_json::Error> {
 /// The Task **metadata block** for one promise — §Surface 3.
 ///
 /// This is the object you merge into a `Task`'s `metadata`, not a whole `Task`.
-/// pinki has no task `status` and no way to learn one, and a promise with no `task`
-/// field has no Task id to put on a fabricated envelope — emitting either would be
-/// asserting A2A state pinki cannot observe. One key, one value: the §1 record
-/// verbatim.
-pub fn task_metadata(record: &Promise) -> Result<String, serde_json::Error> {
-    let mut block: BTreeMap<String, &Promise> = BTreeMap::new();
-    block.insert(metadata_key(), record);
+/// pinki has no A2A task `status` and no way to learn one, so it emits no fabricated
+/// Task envelope. The value is the same detail read model as `show --json`, with the
+/// declaration still at the same path for older readers.
+pub fn task_metadata<T: Serialize>(detail: &T) -> Result<String, serde_json::Error> {
+    let mut block: BTreeMap<String, &T> = BTreeMap::new();
+    block.insert(metadata_key(), detail);
     serde_json::to_string_pretty(&block)
 }
 
@@ -151,14 +151,5 @@ mod tests {
                 .unwrap_or_else(|| panic!("{field} missing or out of order in:\n{json}"));
             cursor += at + needle.len();
         }
-    }
-
-    #[test]
-    fn task_block_carries_no_computed_state() {
-        // A2A-EXTENSION.md §2: `overdue` is never an A2A state, and no computed state
-        // rides the metadata block at all — it carries the record, nothing else.
-        let json = task_metadata(&record()).unwrap();
-        assert!(!json.contains("state"));
-        assert!(!json.contains("overdue"));
     }
 }

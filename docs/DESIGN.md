@@ -330,6 +330,16 @@ late judgment matters is the reader's call.
 
 Append-only JSONL. Four event types. State is a fold over the log.
 
+### Building readers
+
+If a reader keeps a cursor, advance it only after rendering the full range it
+consumed. A truncated view must leave the cursor in place, or offer an explicit
+peek that does not advance it. Keep one cursor per reader identity: two readers
+sharing a cursor each miss part of the stream. A tool that reads, changes, then
+writes the log (for example, to compact or trim it) is a second **writer**, not a
+reader. It needs merge discipline with every other writer. Append-only readers
+leave the log intact.
+
 Every new CLI line has a `source` beside its `ts`: `cli` means pinki stamped the
 current second at append; `supplied` means the caller passed `--ts ISO` (or `ts` in
 a stdin promise record). All four write verbs accept `--ts`. A supplied timestamp
@@ -412,7 +422,8 @@ something.
 
 That is the one rule pinki is strict about, and it is strict on purpose: "done" that
 points at nothing is the exact failure this whole category of tool exists to catch.
-A prose summary is welcome in `note`; it is not evidence. A resolve event with an
+A prose summary is welcome in `note` (`resolve --note TEXT`); it is stored on the
+resolve event and shown by `show`, but the fold never reads it as evidence. A resolve event with an
 empty `evidence` list is malformed, and pinki says so.
 
 Note what pinki does *not* do: it does not verify that `by` on the resolve event
