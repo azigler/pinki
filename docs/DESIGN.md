@@ -337,7 +337,11 @@ Older lines without `source` keep it **absent** in the read model. Guessing `cli
 would mislabel history written by another tool. `show --json` and `ls --json` expose
 the declaration's `ts` and `source`; `show --json` also exposes `source` on each
 horizon, resolution, and assessment. Text `show` labels only supplied timestamps.
-The fold still uses log order, not event timestamps.
+The fold still uses log order, not event timestamps. So the CLI does not check that a
+supplied resolve, amend or assessment timestamp falls after its declaration: an import
+may carry clocks that disagree, and order comes from the log, never from `ts`. A
+reader that sorts by `ts` instead of log order can see a resolution before its
+promise.
 
 ```jsonl
 {"ts":"2026-08-28T20:14:03Z","type":"promise","id":"pnk_4f3a91","promise":"hand back a reviewed schema","by":"…/reviewer","to":"…/author","on":"pnk_0c2b77","until":"2026-09-01T17:00:00Z"}
