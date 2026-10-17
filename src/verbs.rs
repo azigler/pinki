@@ -23,7 +23,7 @@
 //! pipeline never receives prose.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, IsTerminal, Read};
 use std::str::FromStr;
@@ -40,7 +40,7 @@ use crate::export;
 use crate::id;
 use crate::ledger;
 use crate::record::{Meta, Promise};
-use crate::state::{fold, PromiseView, State};
+use crate::state::{fold, Fold, GraphVisit, PromiseView, State};
 
 /// A command that did not succeed.
 ///
@@ -695,6 +695,98 @@ struct Row<'a> {
     state: &'static str,
 }
 
+/// A tree row has the same record and state as flat `ls`; only the presentation
+/// adds children and, for a dangling edge, a marker.
+#[derive(Serialize)]
+struct TreeRow<'a> {
+    #[serde(flatten)]
+    row: Row<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unknown_antecedent: Option<&'a str>,
+    children: Vec<TreeRow<'a>>,
+}
+
+/// A reverse-edge result. Depth one waits directly on the requested promise.
+#[derive(Serialize)]
+struct WaiterRow<'a> {
+    #[serde(flatten)]
+    row: Row<'a>,
+    depth: usize,
+}
+
+fn row<'a>(view: &PromiseView<'a>) -> Row<'a> {
+    Row {
+        record: view.current_record(),
+        state: view.state.as_str(),
+    }
+}
+
+fn graph_roots<'a>(folded: &Fold<'a>, allowed: &HashSet<&str>) -> Vec<&'a str> {
+    folded
+        .iter()
+        .filter(|view| {
+            allowed.contains(view.id())
+                && view
+                    .record
+                    .on
+                    .as_deref()
+                    .is_none_or(|on| !allowed.contains(on))
+        })
+        .map(PromiseView::id)
+        .collect()
+}
+
+fn tree_json<'a>(visits: &[GraphVisit<'_, 'a>], folded: &Fold<'a>) -> Vec<TreeRow<'a>> {
+    let mut built: HashMap<&str, Vec<TreeRow<'a>>> = HashMap::new();
+    let mut roots = Vec::new();
+    // Reverse pre-order is post-order for each subtree. Each child is complete when
+    // its parent is built, without recursion or a second graph traversal.
+    for visit in visits.iter().rev() {
+        let view = visit.view;
+        let mut children = built.remove(view.id()).unwrap_or_default();
+        children.reverse();
+        let node = TreeRow {
+            row: row(view),
+            unknown_antecedent: view
+                .record
+                .on
+                .as_deref()
+                .filter(|on| folded.get(on).is_none()),
+            children,
+        };
+        if visit.depth == 0 {
+            roots.push(node);
+        } else if let Some(on) = view.record.on.as_deref() {
+            built.entry(on).or_default().push(node);
+        }
+    }
+    roots.reverse();
+    roots
+}
+
+fn print_graph_rows(visits: &[GraphVisit<'_, '_>], folded: &Fold<'_>) {
+    for visit in visits {
+        let view = visit.view;
+        let indent = "  ".repeat(visit.depth);
+        let missing = view
+            .record
+            .on
+            .as_deref()
+            .filter(|on| folded.get(on).is_none())
+            .map(|on| format!(" [unknown antecedent: {on}]"))
+            .unwrap_or_default();
+        println!(
+            "{indent}{}  {}  {}  {} -> {}  {}{missing}",
+            view.id(),
+            view.state,
+            view.until(),
+            view.record.by,
+            view.record.to,
+            ellipsize(&view.record.promise, 56),
+        );
+    }
+}
+
 fn ls(args: LsArgs) -> Result<(), Fail> {
     let events = read_existing_ledger()?;
     let now = now_to_the_second();
@@ -715,14 +807,22 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
         .filter(|view| args.to.as_deref().is_none_or(|to| view.record.to == to))
         .collect();
 
+    if args.tree {
+        let allowed: HashSet<&str> = rows.iter().map(|view| view.id()).collect();
+        let roots = graph_roots(&folded, &allowed);
+        let visits = folded.walk(&roots, &allowed, true);
+        if args.json {
+            println!("{}", encode(&tree_json(&visits, &folded))?);
+        } else if visits.is_empty() {
+            print_empty_ls(&folded);
+        } else {
+            print_graph_rows(&visits, &folded);
+        }
+        return Ok(());
+    }
+
     if args.json {
-        let json: Vec<Row> = rows
-            .iter()
-            .map(|view| Row {
-                record: view.current_record(),
-                state: view.state.as_str(),
-            })
-            .collect();
+        let json: Vec<Row> = rows.iter().map(|view| row(view)).collect();
         // An empty ledger prints `[]` and exits 0: nobody has promised anything, which
         // is a legitimate state and not an error.
         println!("{}", encode(&json)?);
@@ -735,17 +835,7 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
         // stays exactly as machine-readable as it was, and the exit code stays 0 —
         // nobody having promised anything is a legitimate state, not an error. The
         // file exists to get here; a missing one already failed in the read above.
-        if folded.is_empty() {
-            eprintln!(
-                "pinki: the ledger at {} holds no promises",
-                ledger::absolute_path().display()
-            );
-        } else {
-            eprintln!(
-                "pinki: no promises match; the ledger holds {} — `pinki ls --all` shows every state",
-                folded.len()
-            );
-        }
+        print_empty_ls(&folded);
         return Ok(());
     }
 
@@ -769,6 +859,20 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
         );
     }
     Ok(())
+}
+
+fn print_empty_ls(folded: &Fold<'_>) {
+    if folded.is_empty() {
+        eprintln!(
+            "pinki: the ledger at {} holds no promises",
+            ledger::absolute_path().display()
+        );
+    } else {
+        eprintln!(
+            "pinki: no promises match; the ledger holds {} — `pinki ls --all` shows every state",
+            folded.len()
+        );
+    }
 }
 
 // ---------------------------------------------------------------- show
@@ -856,6 +960,25 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     let view = folded
         .get(&args.id)
         .ok_or_else(|| unknown_id(&args.id, "show"))?;
+
+    if args.waiters {
+        let allowed: HashSet<&str> = folded.iter().map(PromiseView::id).collect();
+        let visits = folded.walk(&[view.id()], &allowed, false);
+        let waiters = &visits[1..];
+        if args.json {
+            let rows: Vec<WaiterRow> = waiters
+                .iter()
+                .map(|visit| WaiterRow {
+                    row: row(visit.view),
+                    depth: visit.depth,
+                })
+                .collect();
+            println!("{}", encode(&rows)?);
+        } else {
+            print_graph_rows(waiters, &folded);
+        }
+        return Ok(());
+    }
 
     let resolution = view.resolution.and_then(|event| {
         // `kind` and `by` are the same question for all three outcomes — §4 puts them

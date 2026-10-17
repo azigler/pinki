@@ -13,6 +13,13 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- **Graph reads for the existing `on` edge**
+  ([#10](https://github.com/azigler/pinki/issues/10)). `ls --tree` indents
+  dependents under their antecedent; `--json` nests them in `children`. Every
+  row carries the fold's computed state. `show ID --waiters` lists direct and
+  transitive dependents, with `depth` in its flat JSON output. A promise with
+  an unknown antecedent appears as a marked root. These are read views only;
+  the ledger format and `export` are unchanged.
 - **An observer can supersede its own assessment**
   ([#1](https://github.com/azigler/pinki/issues/1)). `assess` takes
   `--supersedes TS`, the `ts` of an earlier assessment of the same promise, as `show`

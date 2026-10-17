@@ -1856,6 +1856,142 @@ fn an_ambiguous_or_already_superseded_reference_is_refused() {
 // ---------------------------------------------------------------------- ls
 
 #[test]
+fn graph_reads_three_levels_in_both_directions_with_folded_states() {
+    let scratch = Scratch::new();
+    for (id, on) in [
+        ("root", None),
+        ("middle", Some("root")),
+        ("leaf", Some("middle")),
+    ] {
+        let mut args = vec![
+            "promise", id, "--id", id, "--by", "debtor", "--to", "creditor", "--until", FUTURE,
+        ];
+        if let Some(on) = on {
+            args.extend(["--on", on]);
+        }
+        scratch.run(&args).expect(0);
+    }
+    scratch
+        .run(&[
+            "resolve",
+            "root",
+            "--satisfied",
+            "--evidence",
+            "https://example.org/root",
+        ])
+        .expect(0);
+
+    let tree_text = scratch.run(&["ls", "--tree", "--all"]);
+    tree_text.expect(0);
+    let lines: Vec<&str> = tree_text.stdout.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].starts_with("root  satisfied"), "{lines:?}");
+    assert!(lines[1].starts_with("  middle  detached"), "{lines:?}");
+    assert!(lines[2].starts_with("    leaf  conditional"), "{lines:?}");
+
+    let tree = scratch.run(&["ls", "--tree", "--all", "--json"]);
+    tree.expect(0);
+    let json = tree.json();
+    let roots = json.as_array().expect("a forest");
+    assert_eq!(roots.len(), 1);
+    let root = &roots[0];
+    let middle = &root["children"][0];
+    let leaf = &middle["children"][0];
+    assert_eq!(root["id"], "root");
+    assert_eq!(middle["id"], "middle");
+    assert_eq!(leaf["id"], "leaf");
+    assert_eq!(leaf["children"], serde_json::json!([]));
+    for node in [root, middle, leaf] {
+        assert_eq!(
+            node["state"],
+            state_of(&scratch, node["id"].as_str().unwrap())
+        );
+    }
+
+    let waiter_text = scratch.run(&["show", "root", "--waiters"]);
+    waiter_text.expect(0);
+    let lines: Vec<&str> = waiter_text.stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("  middle  detached"), "{lines:?}");
+    assert!(lines[1].starts_with("    leaf  conditional"), "{lines:?}");
+    let waiters = scratch.run(&["show", "root", "--waiters", "--json"]);
+    waiters.expect(0);
+    let waiters = waiters.json();
+    assert_eq!(waiters[0]["id"], "middle");
+    assert_eq!(waiters[0]["depth"], 1);
+    assert_eq!(waiters[1]["id"], "leaf");
+    assert_eq!(waiters[1]["depth"], 2);
+    assert_eq!(waiters.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn tree_marks_an_unknown_antecedent_as_a_root() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&[
+            "promise",
+            "first",
+            "--id",
+            "orphan",
+            "--by",
+            "debtor",
+            "--to",
+            "creditor",
+            "--until",
+            FUTURE,
+            "--on",
+            "not-in-this-ledger",
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "promise", "second", "--id", "child", "--by", "debtor", "--to", "creditor", "--until",
+            FUTURE, "--on", "orphan",
+        ])
+        .expect(0);
+
+    let text = scratch.run(&["ls", "--tree"]);
+    text.expect(0);
+    assert!(text
+        .stdout
+        .lines()
+        .next()
+        .unwrap()
+        .starts_with("orphan  conditional"));
+    assert!(text
+        .stdout
+        .contains("[unknown antecedent: not-in-this-ledger]"));
+    assert!(text.stdout.contains("\n  child  conditional"));
+    let json = scratch.run(&["ls", "--tree", "--json"]);
+    json.expect(0);
+    let json = json.json();
+    assert_eq!(json[0]["id"], "orphan");
+    assert_eq!(json[0]["unknown_antecedent"], "not-in-this-ledger");
+    assert_eq!(json[0]["children"][0]["id"], "child");
+}
+
+#[test]
+fn tree_keeps_a_cycle_that_a_later_declaration_completed() {
+    let scratch = Scratch::new();
+    for (id, on) in [("first", "second"), ("second", "first")] {
+        scratch
+            .run(&[
+                "promise", id, "--id", id, "--by", "debtor", "--to", "creditor", "--until", FUTURE,
+                "--on", on,
+            ])
+            .expect(0);
+    }
+    let tree = scratch.run(&["ls", "--tree", "--all", "--json"]);
+    tree.expect(0);
+    let json = tree.json();
+    assert_eq!(json[0]["id"], "first");
+    assert_eq!(json[0]["state"], "conditional");
+    assert_eq!(json[0]["children"][0]["id"], "second");
+    assert_eq!(json[0]["children"][0]["state"], "conditional");
+    assert_eq!(json[0]["children"][0]["children"], serde_json::json!([]));
+}
+
+#[test]
 fn ls_on_an_empty_ledger_is_an_empty_array() {
     let scratch = Scratch::new();
     scratch.touch();

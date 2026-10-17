@@ -215,6 +215,10 @@ pub struct LsArgs {
     #[arg(long, value_name = "WHO")]
     pub to: Option<String>,
 
+    /// Show the `on` graph as a forest; JSON nests children under antecedents.
+    #[arg(long)]
+    pub tree: bool,
+
     /// Emit a JSON array instead of a table.
     #[arg(long)]
     pub json: bool,
@@ -249,6 +253,10 @@ pub enum Scope {
 pub struct ShowArgs {
     /// The promise to show.
     pub id: String,
+
+    /// Show every promise transitively waiting on this one.
+    #[arg(long)]
+    pub waiters: bool,
 
     /// Emit one JSON object instead of a human-readable block.
     #[arg(long)]

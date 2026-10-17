@@ -52,6 +52,26 @@ pinki ls --json
 pinki show "$id" --json
 ```
 
+The `on` edge links a promise to the one it waits for. `ls --tree` shows the
+forest, with each promise's computed state. `show ID --waiters` lists every
+promise that waits on `ID`, including indirect waiters. Add `--json` for nested
+tree rows or a flat waiter list with `depth` (direct waiters have depth 1).
+`--all` includes settled antecedents in the tree; the usual `ls` state and
+party filters still apply.
+
+```sh
+waiter_receipt=$(pinki promise "Publish the reviewed schema" \
+  --by https://example.org/agents/author \
+  --to https://example.org/agents/publisher \
+  --until 2030-01-03T00:00:00Z --on "$id")
+waiter_id=${waiter_receipt%%$'\t'*}
+pinki ls --tree --all
+pinki show "$id" --waiters --json
+```
+
+If `on` names an id absent from this ledger, the promise appears as a root
+marked `unknown antecedent` in text and `unknown_antecedent` in tree JSON.
+
 The debtor can move the deadline. pinki keeps each earlier deadline in the ledger.
 
 ```sh
