@@ -11,7 +11,22 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-18
+
 ### Added
+
+- **`correct` relabels a mislabelled outcome** (append-only). `pinki correct ID --as
+  satisfied|cancelled|released|lapsed|refused --reason TEXT --by WHO` (plus `--evidence`
+  for `satisfied`) records a correction of the winning `resolve`. The first resolve still
+  wins as the resolution record and stays in the ledger; the latest authorized correction
+  in log order sets computed state, including dependents. Only the author of the winning
+  resolution may correct it (the same-author rule as assessment supersede). `show` and
+  `export` include the correction history. A correction that repeats the current state is
+  a named no-op (DESIGN.md §4).
+- **`a2a task` carries provenance.** The metadata block adds
+  `provenance: {as_of, ledger_ref}`: the UTC instant the computed state is true as of, and
+  an opaque `sha256:` reference to the ledger snapshot it was read from (never a local
+  path). `--now ISO` fixes `as_of` for reproducible output (A2A-EXTENSION.md §1).
 
 - `resolve --lapsed --by WHO` records a deadline that passed when the work can
   no longer be done; `resolve --refused --reason TEXT --by WHO` records the
@@ -424,7 +439,8 @@ The nucleus: enough of pinki to actually use, and enough tests to believe it.
   not run while the suite is green. An unexplained gap and a deliberate one look
   identical in a coverage report; these are on the record as deliberate.
 
-[Unreleased]: https://github.com/azigler/pinki/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/azigler/pinki/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/azigler/pinki/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/azigler/pinki/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/azigler/pinki/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/azigler/pinki/compare/v0.1.0...v0.2.0
