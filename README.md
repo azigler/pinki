@@ -8,11 +8,11 @@ Use it when agents need to carry obligations across tasks, sessions, or organiza
 ## Install
 
 ```text
-cargo install --git https://github.com/azigler/pinki --tag v0.4.0 --locked
+cargo install --git https://github.com/azigler/pinki --tag v0.5.0 --locked
 ```
 
-Or take the prebuilt Linux x86_64 binary from the v0.4.0 release:
-https://github.com/azigler/pinki/releases/tag/v0.4.0. Check with `pinki --version`.
+Or take the prebuilt Linux x86_64 binary from the v0.5.0 release:
+https://github.com/azigler/pinki/releases/tag/v0.5.0. Check with `pinki --version`.
 
 ## Start a ledger and declare a promise
 

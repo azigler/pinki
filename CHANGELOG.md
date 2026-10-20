@@ -11,6 +11,13 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Fixed
+
+- The README's install lines now name v0.5.0, not v0.4.0.
+- `scripts/check-readme.sh` now builds the tree it checks (`cargo build --release --locked`) unless
+  `PINKI_BIN` is set. A leftover `target/release` build or an older installed `pinki` can no
+  longer make the check fail, or pass, falsely.
+
 ## [0.5.0] - 2026-10-18
 
 ### Added
