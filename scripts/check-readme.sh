@@ -6,10 +6,6 @@ cd "$repo_root"
 
 if [[ -n ${PINKI_BIN:-} ]]; then
   binary=$PINKI_BIN
-elif [[ -x target/release/pinki ]]; then
-  binary=target/release/pinki
-elif command -v pinki >/dev/null 2>&1; then
-  binary=$(command -v pinki)
 else
   cargo build --release --locked
   binary=target/release/pinki
