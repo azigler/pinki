@@ -22,9 +22,9 @@ an array. A Task can therefore carry several promises.
 Each record has the declaration fields from [DESIGN.md §1](DESIGN.md#1-the-record)
 and the computed fields from `show --json`. It also has `node` (the publishing
 host name), `qid` (`HOST:SEAT:ID`), and `provenance` with `as_of` and
-`ledger_ref`. `qid` follows the estate's X-Seat-Address `host:seat` shape and
-adds the promise id. The bare `id` stays in the record. The reference is
-`HOST:sha256:<digest>`; the digest covers the same ledger bytes as v0. Both
+`ledger_ref`. `qid` is a `host:seat` address with the promise id appended. The
+bare `id` stays in the record. The reference is
+`HOST:sha256:<digest>`; the digest covers the same ledger bytes as v0. All
 records in one response have the same ledger reference and read instant.
 
 ```json
@@ -46,7 +46,8 @@ records in one response have the same ledger reference and read instant.
 The example shows the container and address fields. Run `pinki a2a card` for the v1
 declaration and `pinki a2a task --node HOST --seat SEAT ID [ID ...]` for the
 metadata block. `--seat` is required for v1. `--node` defaults to `PINKI_NODE`,
-then the short host name. Node and seat must be non-empty and have no colon or
+then the short host name (from `hostname -s`). A set but empty `PINKI_NODE` is an
+error, not a fallback. Node and seat must be non-empty and have no colon or
 whitespace. IP addresses cannot be nodes. `--now ISO` fixes `as_of` as in v0.
 An unknown id fails the whole command with no metadata on stdout.
 
@@ -291,8 +292,10 @@ observable, which is the most any of this was ever going to offer.
 
 ## 6. The URI is provisional
 
-`https://github.com/azigler/pinki/ext/promise/v0` is a placeholder chosen because it
-is an origin the project actually controls. A2A places no scheme or domain
+`https://github.com/azigler/pinki/ext/promise/v1` is the current URI; `v0` was the
+first, and the move from v0 to v1 (a list replaced the single record) is the rule
+below applied once already. Both are placeholders chosen because they sit on an
+origin the project actually controls. A2A places no scheme or domain
 requirement on third-party extensions — *"anyone is able to define, publish, and
 implement an extension"* — but it does say the specification **should** be hosted at
 the extension's URI, and encourages a permanent identifier service such as
@@ -303,6 +306,6 @@ Official extensions live under `https://a2a-protocol.org/extensions/`, in the
 decision this repo can make for itself.
 
 Also normative and worth stating early: **a breaking change MUST use a new URI.**
-Hence `v0`, and hence the expectation that it will move.
+Hence `v0`, then `v1`, and hence the expectation that it will move again.
 
 This is [open question 1](DESIGN.md#8-open-questions). Opinions welcome.
