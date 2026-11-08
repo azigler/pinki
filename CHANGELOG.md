@@ -11,6 +11,16 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Added
+
+- A2A promise extension v1 is the default for `a2a card` and `a2a task`.
+  `a2a task --seat SEAT [--node HOST] ID [ID ...]` emits one ordered promise
+  list under the v1 `/promises` metadata key. Each record adds `node`,
+  `qid` (`HOST:SEAT:ID`), and a node-prefixed ledger reference. The node
+  defaults to `PINKI_NODE`, then the short host name. `--ext v0` keeps the
+  original card and single-promise task output for one minor release; v0 is
+  deprecated and will be removed in the next minor release.
+
 ### Fixed
 
 - The README's install lines now name v0.5.0, not v0.4.0.

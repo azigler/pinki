@@ -18,10 +18,10 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use crate::record::Promise;
 
-/// The extension URI. Provisional — A2A-EXTENSION.md §6, and DESIGN.md §8's first
-/// open question. It lives here, once: a breaking change MUST use a new URI, so the
-/// string is a single edit rather than a grep.
-pub const URI: &str = "https://github.com/azigler/pinki/ext/promise/v0";
+/// The v0 URI remains available for one minor release.
+pub const URI_V0: &str = "https://github.com/azigler/pinki/ext/promise/v0";
+/// v1 uses a new URI because the metadata value changes shape.
+pub const URI_V1: &str = "https://github.com/azigler/pinki/ext/promise/v1";
 
 /// The `description` A2A-EXTENSION.md §Surface 1 puts on the declaration, verbatim.
 const DESCRIPTION: &str =
@@ -29,7 +29,7 @@ const DESCRIPTION: &str =
 
 /// The `metadata` key a promise record rides under — §Surface 3.
 pub fn metadata_key() -> String {
-    format!("{URI}/promise")
+    format!("{URI_V0}/promise")
 }
 
 /// The AgentCard block — §Surface 1.
@@ -41,10 +41,18 @@ pub fn metadata_key() -> String {
 /// URL where its operator publishes assessments. Inventing one would be a claim
 /// about the world made by a tool that cannot see it.
 pub fn card() -> Result<String, serde_json::Error> {
+    card_for(URI_V0)
+}
+
+pub fn card_v1() -> Result<String, serde_json::Error> {
+    card_for(URI_V1)
+}
+
+fn card_for(uri: &'static str) -> Result<String, serde_json::Error> {
     let block = Card {
         capabilities: Capabilities {
             extensions: vec![Extension {
-                uri: URI,
+                uri,
                 description: DESCRIPTION,
                 required: false,
                 params: BTreeMap::new(),
@@ -77,6 +85,36 @@ pub fn task_metadata<T: Serialize>(
     serde_json::to_string_pretty(&block)
 }
 
+/// v1 carries an ordered list under one metadata key. Callers validate all ids
+/// before this function serializes anything, so an unknown id cannot leak a
+/// partial JSON block to stdout.
+pub fn task_metadata_v1<T: Serialize>(
+    details: &[T],
+    ids: &[String],
+    node: &str,
+    seat: &str,
+    as_of: &str,
+    ledger_ref: &str,
+) -> Result<String, serde_json::Error> {
+    let reference = format!("{node}:{ledger_ref}");
+    let promises: Vec<_> = details
+        .iter()
+        .zip(ids)
+        .map(|(detail, id)| V1TaskValue {
+            detail,
+            node,
+            qid: format!("{node}:{seat}:{id}"),
+            provenance: Provenance {
+                as_of,
+                ledger_ref: &reference,
+            },
+        })
+        .collect();
+    let mut block = BTreeMap::new();
+    block.insert(format!("{URI_V1}/promises"), promises);
+    serde_json::to_string_pretty(&block)
+}
+
 /// A path-free reference to the exact ledger bytes that supplied the fold.
 /// The same contents in a copied ledger have the same reference.
 pub fn ledger_ref(contents: &str) -> String {
@@ -88,6 +126,15 @@ pub fn ledger_ref(contents: &str) -> String {
 struct TaskValue<'a, T: Serialize> {
     #[serde(flatten)]
     detail: &'a T,
+    provenance: Provenance<'a>,
+}
+
+#[derive(Serialize)]
+struct V1TaskValue<'a, T: Serialize> {
+    #[serde(flatten)]
+    detail: &'a T,
+    node: &'a str,
+    qid: String,
     provenance: Provenance<'a>,
 }
 
@@ -136,7 +183,7 @@ mod tests {
     fn card_matches_surface_1() {
         let value: serde_json::Value = serde_json::from_str(&card().unwrap()).unwrap();
         let ext = &value["capabilities"]["extensions"][0];
-        assert_eq!(ext["uri"], URI);
+        assert_eq!(ext["uri"], URI_V0);
         assert_eq!(ext["description"], DESCRIPTION);
         assert_eq!(ext["required"], serde_json::json!(false));
         assert_eq!(ext["params"], serde_json::json!({}));

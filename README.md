@@ -162,17 +162,18 @@ Exit 1 means a missing ledger, an unknown id, or an already-resolved promise
 ```
 
 For A2A, advertise the card extension and merge the block into Task `metadata`.
-Your client sets `A2A-Extensions: https://github.com/azigler/pinki/ext/promise/v0`.
+Your client sets `A2A-Extensions: https://github.com/azigler/pinki/ext/promise/v1`.
 
 ```sh
 pinki a2a card
-pinki a2a task "$id"
+pinki a2a task --node example-host --seat reviewer "$id"
 ```
 
-`a2a task` emits this metadata shape (the id comes from the ledger):
+`a2a task` emits one metadata object. Its `/promises` value is an array in the
+requested id order (the ids come from the ledger):
 
 ```json
-{"https://github.com/azigler/pinki/ext/promise/v0/promise": {"id": "pnk_4f3a91",
+{"https://github.com/azigler/pinki/ext/promise/v1/promises": [{"id": "pnk_4f3a91",
   "promise": "Review the schema",
   "by": "https://example.org/agents/reviewer", "to": "https://example.org/agents/author",
   "until": "2030-01-02T00:00:00Z", "task": "a2a-task-91",
@@ -180,12 +181,19 @@ pinki a2a task "$id"
   "horizons": [{"ts":"2026-08-28T20:14:03Z","source":"cli","until":"2030-01-01T00:00:00Z","by":"https://example.org/agents/reviewer"},
                {"ts":"2026-08-29T12:00:00Z","source":"cli","until":"2030-01-02T00:00:00Z","by":"https://example.org/agents/reviewer","reason":"Review needs another day"}],
   "resolution": {"as":"satisfied","ts":"2026-08-30T12:00:00Z","source":"cli","by":"https://example.org/agents/reviewer","evidence":["https://example.org/reviews/schema-91"]},
-  "assessments": []
-}}
+  "corrections": [], "assessments": [],
+  "node": "example-host", "qid": "example-host:reviewer:pnk_4f3a91",
+  "provenance": {"as_of": "2026-08-30T12:05:00Z", "ledger_ref": "example-host:sha256:<ledger-snapshot-digest>"}
+}]}
 ```
 
-These are pinki promise fields, not A2A Task status. The declaration stays at the
-same path. An open promise has a computed open `state` and `resolution: null`.
+Pass more ids to carry more records in the same array. These are pinki promise
+fields, not A2A Task status. An open promise has a computed open `state` and
+`resolution: null`. `--node` defaults to
+`PINKI_NODE`, then the short host name; `--seat` is required. To read a v0 block
+for one minor release, use `pinki a2a card --ext v0` or
+`pinki a2a task --ext v0 ID`. v0 is deprecated and will be removed in the
+next minor release.
 
 `pinki a2a` writes JSON to stdout; your A2A client sends it. pinki makes no network calls.
 

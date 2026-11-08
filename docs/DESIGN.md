@@ -581,8 +581,8 @@ pinki show  pnk_4f3a91 [--waiters] [--json]
 pinki export [--format json|jsonl] [--state STATE]... [--debtor URI] [--creditor URI] \
       [--since ISO] [--now ISO]
 
-pinki a2a card              # emit the AgentCard extension block  -> stdout
-pinki a2a task  pnk_4f3a91  # emit the Task metadata block        -> stdout
+pinki a2a card  # emit the AgentCard extension block -> stdout
+pinki a2a task --node box --seat reviewer pnk_4f3a91  # emit Task metadata -> stdout
 ```
 
 `ls` filters over computed state: `--open` is everything not in a terminal state

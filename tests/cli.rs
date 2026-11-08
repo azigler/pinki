@@ -14,6 +14,7 @@
 //! overdue, `2099-01-01T00:00:00Z` for definitely not. The exact `now > until`
 //! boundary is unit-tested to the second in `src/state.rs`.
 
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -101,7 +102,25 @@ impl Scratch {
     }
 
     fn spawn(&self, args: &[&str], stdin: Option<&str>, ledger: Option<OsString>) -> Run {
+        self.spawn_with_node(args, stdin, ledger, None)
+    }
+
+    fn spawn_with_node(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        ledger: Option<OsString>,
+        node: Option<&str>,
+    ) -> Run {
         let mut command = Command::new(BIN);
+        match node {
+            Some(node) => {
+                command.env("PINKI_NODE", node);
+            }
+            None => {
+                command.env_remove("PINKI_NODE");
+            }
+        }
         match &ledger {
             Some(ledger) => command.env("PINKI_LEDGER", ledger),
             None => command.env_remove("PINKI_LEDGER"),
@@ -548,7 +567,7 @@ fn a_foreign_id_round_trips_through_every_verb_that_takes_one() {
 
     // The A2A metadata block carries it unchanged — which is the point of #5's second
     // consequence: two parties join on this key or they do not join at all.
-    let block = scratch.run(&["a2a", "task", FOREIGN]);
+    let block = scratch.run(&["a2a", "task", "--ext", "v0", FOREIGN]);
     block.expect(0);
     let block = block.json();
     let (_, record) = block.as_object().expect("an object").iter().next().unwrap();
@@ -1173,7 +1192,7 @@ fn the_a2a_block_carries_the_horizon_as_it_stands() {
         .run(&["amend", &id, "--until", FUTURE, "--reason", "nudge 1"])
         .expect(0);
 
-    let run = scratch.run(&["a2a", "task", &id]);
+    let run = scratch.run(&["a2a", "task", "--ext", "v0", &id]);
     run.expect(0);
     let block = run.json();
     let (_, record) = block.as_object().expect("an object").iter().next().unwrap();
@@ -1438,7 +1457,7 @@ fn lapsed_checks_the_current_horizon_and_is_terminal_everywhere() {
     assert_eq!(row, exported["promises"][0]);
     let key = "https://github.com/azigler/pinki/ext/promise/v0/promise";
     assert_eq!(
-        scratch.run(&["a2a", "task", &id]).json()[key]["state"],
+        scratch.run(&["a2a", "task", "--ext", "v0", &id]).json()[key]["state"],
         "lapsed"
     );
 
@@ -1533,7 +1552,7 @@ fn refused_requires_debtor_and_reason_and_is_terminal() {
     );
     let key = "https://github.com/azigler/pinki/ext/promise/v0/promise";
     assert_eq!(
-        scratch.run(&["a2a", "task", &id]).json()[key]["state"],
+        scratch.run(&["a2a", "task", "--ext", "v0", &id]).json()[key]["state"],
         "refused"
     );
 }
@@ -3158,13 +3177,15 @@ fn export_on_a_missing_ledger_fails_and_names_the_absolute_path() {
 
 #[test]
 fn a2a_task_on_a_missing_ledger_fails_and_names_the_absolute_path() {
-    assert_read_refuses_every_missing_ledger(&["a2a", "task", "pnk_000000"]);
+    assert_read_refuses_every_missing_ledger(&["a2a", "task", "--ext", "v0", "pnk_000000"]);
 }
 
 #[test]
 fn a2a_card_reads_no_ledger_so_a_missing_one_is_not_its_business() {
     let scratch = Scratch::new();
-    scratch.run_with_ledger_unset(&["a2a", "card"]).expect(0);
+    scratch
+        .run_with_ledger_unset(&["a2a", "card", "--ext", "v0"])
+        .expect(0);
     assert!(!scratch.ledger().exists());
 }
 
@@ -3261,10 +3282,258 @@ fn a_dependent_detaches_when_its_antecedent_is_satisfied() {
 
 // ----------------------------------------------------------------- a2a purity
 
+const V1_KEY: &str = "https://github.com/azigler/pinki/ext/promise/v1/promises";
+
+#[test]
+fn a2a_v0_bytes_match_the_original_card_and_task_shape() {
+    let scratch = Scratch::new();
+    let card = scratch.run(&["a2a", "card", "--ext", "v0"]);
+    card.expect(0);
+    assert_eq!(card.stdout, concat!(
+        "{\n",
+        "  \"capabilities\": {\n",
+        "    \"extensions\": [\n",
+        "      {\n",
+        "        \"uri\": \"https://github.com/azigler/pinki/ext/promise/v0\",\n",
+        "        \"description\": \"Promises made by this card's subject: deadline, evidence on satisfaction, reason on abandonment.\",\n",
+        "        \"required\": false,\n",
+        "        \"params\": {}\n",
+        "      }\n",
+        "    ]\n",
+        "  }\n",
+        "}\n",
+    ));
+    scratch
+        .run(&[
+            "promise",
+            "fixed",
+            "--id",
+            "fixed",
+            "--by",
+            "debtor",
+            "--to",
+            "creditor",
+            "--until",
+            FUTURE,
+            "--ts",
+            "2026-08-28T00:00:00Z",
+        ])
+        .expect(0);
+    let digest = Sha256::digest(fs::read(scratch.ledger()).unwrap());
+    let task = scratch.run(&[
+        "a2a",
+        "task",
+        "--ext",
+        "v0",
+        "fixed",
+        "--now",
+        "2026-09-01T16:05:00Z",
+    ]);
+    task.expect(0);
+    let expected = format!(
+        concat!(
+            "{{\n",
+            "  \"https://github.com/azigler/pinki/ext/promise/v0/promise\": {{\n",
+            "    \"id\": \"fixed\",\n",
+            "    \"promise\": \"fixed\",\n",
+            "    \"by\": \"debtor\",\n",
+            "    \"to\": \"creditor\",\n",
+            "    \"until\": \"2099-01-01T00:00:00Z\",\n",
+            "    \"ts\": \"2026-08-28T00:00:00Z\",\n",
+            "    \"source\": \"supplied\",\n",
+            "    \"state\": \"detached\",\n",
+            "    \"horizons\": [\n",
+            "      {{\n",
+            "        \"ts\": \"2026-08-28T00:00:00Z\",\n",
+            "        \"source\": \"supplied\",\n",
+            "        \"until\": \"2099-01-01T00:00:00Z\",\n",
+            "        \"by\": \"debtor\"\n",
+            "      }}\n",
+            "    ],\n",
+            "    \"resolution\": null,\n",
+            "    \"corrections\": [],\n",
+            "    \"assessments\": [],\n",
+            "    \"provenance\": {{\n",
+            "      \"as_of\": \"2026-09-01T16:05:00Z\",\n",
+            "      \"ledger_ref\": \"sha256:{digest:x}\"\n",
+            "    }}\n",
+            "  }}\n",
+            "}}\n",
+        ),
+        digest = digest
+    );
+    assert_eq!(task.stdout, expected);
+}
+
+#[test]
+fn a2a_v1_card_is_the_default() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&["a2a", "card"]);
+    run.expect(0);
+    assert_eq!(run.stderr, "");
+    let ext = &run.json()["capabilities"]["extensions"][0];
+    assert_eq!(
+        ext["uri"],
+        "https://github.com/azigler/pinki/ext/promise/v1"
+    );
+    assert_eq!(ext["required"], false);
+    assert_eq!(ext["params"], serde_json::json!({}));
+}
+
+#[test]
+fn a2a_v1_task_carries_ordered_promises_and_addresses() {
+    let scratch = Scratch::new();
+    let first = scratch.promise("first", "debtor", "creditor", FUTURE);
+    let second = scratch.promise("second", "debtor", "creditor", FUTURE);
+    let run = scratch.run(&[
+        "a2a",
+        "task",
+        "--node",
+        "box",
+        "--seat",
+        "aaif",
+        &second,
+        &first,
+        "--now",
+        "2026-09-01T16:05:00Z",
+    ]);
+    run.expect(0);
+    assert_eq!(run.stderr, "");
+    let block = run.json();
+    assert_eq!(block.as_object().unwrap().len(), 1);
+    let records = block[V1_KEY].as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    for (record, id) in records.iter().zip([&second, &first]) {
+        assert_eq!(record["id"], id.as_str());
+        assert_eq!(record["node"], "box");
+        assert_eq!(record["qid"], format!("box:aaif:{id}"));
+        assert_eq!(record["provenance"]["as_of"], "2026-09-01T16:05:00Z");
+        let reference = record["provenance"]["ledger_ref"].as_str().unwrap();
+        assert!(reference.starts_with("box:sha256:"));
+        assert_eq!(reference.len(), "box:sha256:".len() + 64);
+        assert_eq!(record["state"], "detached");
+        assert!(record["resolution"].is_null());
+        let mut detail = record.clone();
+        for field in ["node", "qid", "provenance"] {
+            detail.as_object_mut().unwrap().remove(field);
+        }
+        assert_eq!(detail, scratch.run(&["show", id, "--json"]).json());
+    }
+    assert_eq!(
+        records[0]["provenance"]["ledger_ref"],
+        records[1]["provenance"]["ledger_ref"]
+    );
+}
+
+#[test]
+fn a2a_v1_one_id_is_still_an_array() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("only", "debtor", "creditor", FUTURE);
+    let wire = scratch
+        .run(&["a2a", "task", "--node", "box", "--seat", "aaif", &id])
+        .json();
+    assert_eq!(wire[V1_KEY].as_array().unwrap().len(), 1);
+    assert_eq!(wire[V1_KEY][0]["id"], id);
+}
+
+#[test]
+fn a2a_v1_unknown_id_has_no_partial_output() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("known", "debtor", "creditor", FUTURE);
+    let run = scratch.run(&[
+        "a2a", "task", "--node", "box", "--seat", "aaif", &id, "missing",
+    ]);
+    run.expect(1);
+    assert!(run.stdout.is_empty());
+    assert!(run.stderr.contains("missing"));
+}
+
+#[test]
+fn a2a_v1_requires_seat_and_valid_address_parts() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("known", "debtor", "creditor", FUTURE);
+    let missing = scratch.run(&["a2a", "task", "--node", "box", &id]);
+    missing.expect(2);
+    assert!(missing.stdout.is_empty());
+    assert!(missing.stderr.contains("--seat"));
+    for node in ["bad:node", "bad node", "127.0.0.1", "999.999.999.999"] {
+        let run = scratch.run(&["a2a", "task", "--node", node, "--seat", "aaif", &id]);
+        run.expect(2);
+        assert!(run.stdout.is_empty());
+        assert!(run.stderr.contains("node"), "{node}: {}", run.stderr);
+    }
+    for seat in ["", "bad:seat", "bad seat"] {
+        let run = scratch.run(&["a2a", "task", "--node", "box", "--seat", seat, &id]);
+        run.expect(2);
+        assert!(run.stdout.is_empty());
+        assert!(run.stderr.contains("seat"), "{seat}: {}", run.stderr);
+    }
+}
+
+#[test]
+fn a2a_v1_node_uses_env_then_short_hostname() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("known", "debtor", "creditor", FUTURE);
+    let args = ["a2a", "task", "--seat", "aaif", &id];
+    let from_env = scratch.spawn_with_node(
+        &args,
+        None,
+        Some(scratch.ledger().into_os_string()),
+        Some("envbox"),
+    );
+    from_env.expect(0);
+    assert_eq!(from_env.json()[V1_KEY][0]["node"], "envbox");
+    let override_args = ["a2a", "task", "--node", "flagbox", "--seat", "aaif", &id];
+    let override_run = scratch.spawn_with_node(
+        &override_args,
+        None,
+        Some(scratch.ledger().into_os_string()),
+        Some("envbox"),
+    );
+    assert_eq!(override_run.json()[V1_KEY][0]["node"], "flagbox");
+    let short_host = Command::new("hostname").arg("-s").output().unwrap();
+    assert!(short_host.status.success());
+    let expected = String::from_utf8(short_host.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let fallback = scratch.run(&args);
+    fallback.expect(0);
+    assert_eq!(fallback.json()[V1_KEY][0]["node"], expected);
+}
+
+#[test]
+fn a2a_v1_ledger_reference_changes_after_amend_but_qid_does_not() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("known", "debtor", "creditor", FUTURE);
+    let args = [
+        "a2a",
+        "task",
+        "--node",
+        "box",
+        "--seat",
+        "aaif",
+        &id,
+        "--now",
+        "2026-09-01T16:05:00Z",
+    ];
+    let before = scratch.run(&args).json();
+    scratch
+        .run(&["amend", &id, "--until", "2098-01-01T00:00:00Z"])
+        .expect(0);
+    let after = scratch.run(&args).json();
+    assert_eq!(before[V1_KEY][0]["qid"], after[V1_KEY][0]["qid"]);
+    assert_ne!(
+        before[V1_KEY][0]["provenance"]["ledger_ref"],
+        after[V1_KEY][0]["provenance"]["ledger_ref"]
+    );
+    assert_eq!(after[V1_KEY][0]["until"], "2098-01-01T00:00:00Z");
+}
+
 #[test]
 fn a2a_card_is_json_on_stdout_and_silence_on_stderr() {
     let scratch = Scratch::new();
-    let run = scratch.run(&["a2a", "card"]);
+    let run = scratch.run(&["a2a", "card", "--ext", "v0"]);
     run.expect(0);
     assert_eq!(run.stderr, "", "the a2a verbs write nothing to stderr");
 
@@ -3304,7 +3573,7 @@ fn a2a_task_emits_the_metadata_block_for_one_promise() {
     b_run.expect(0);
     let b = b_run.id();
 
-    let run = scratch.run(&["a2a", "task", &b]);
+    let run = scratch.run(&["a2a", "task", "--ext", "v0", &b]);
     run.expect(0);
     assert_eq!(run.stderr, "", "the a2a verbs write nothing to stderr");
 
@@ -3378,7 +3647,7 @@ fn a2a_task_carries_corrected_state_and_correction_history() {
         ])
         .expect(0);
 
-    let block = scratch.run(&["a2a", "task", &id]);
+    let block = scratch.run(&["a2a", "task", "--ext", "v0", &id]);
     block.expect(0);
     let record = &block.json()["https://github.com/azigler/pinki/ext/promise/v0/promise"];
     assert_eq!(record["state"], "satisfied");
@@ -3397,7 +3666,15 @@ fn a2a_task_carries_corrected_state_and_correction_history() {
 fn a2a_task_now_fixes_the_read_instant_and_copied_ledger_reference() {
     let scratch = Scratch::new();
     let id = scratch.promise("send review", "reviewer", "author", PAST);
-    let args = ["a2a", "task", &id, "--now", "2026-09-01T16:05:00Z"];
+    let args = [
+        "a2a",
+        "task",
+        "--ext",
+        "v0",
+        &id,
+        "--now",
+        "2026-09-01T16:05:00Z",
+    ];
     let first = scratch.run(&args);
     first.expect(0);
     assert_eq!(first.stdout, scratch.run(&args).stdout);
@@ -3432,7 +3709,12 @@ fn a2a_task_now_fixes_the_read_instant_and_copied_ledger_reference() {
         after_blank_line[key]["provenance"]["ledger_ref"]
     );
     assert_eq!(changed[key]["provenance"]["as_of"], "2026-09-01T16:05:00Z");
-    assert_eq!(scratch.run(&["a2a", "task", &id, "--now", "bad"]).code, 2);
+    assert_eq!(
+        scratch
+            .run(&["a2a", "task", "--ext", "v0", &id, "--now", "bad"])
+            .code,
+        2
+    );
 }
 
 #[test]
@@ -3492,8 +3774,10 @@ fn a2a_task_distinguishes_satisfied_from_open_and_carries_assessment_history() {
         .expect(0);
 
     let key = "https://github.com/azigler/pinki/ext/promise/v0/promise";
-    let open_wire = scratch.run(&["a2a", "task", &open]).json();
-    let satisfied_wire = scratch.run(&["a2a", "task", "delivered"]).json();
+    let open_wire = scratch.run(&["a2a", "task", "--ext", "v0", &open]).json();
+    let satisfied_wire = scratch
+        .run(&["a2a", "task", "--ext", "v0", "delivered"])
+        .json();
     let open_detail = &open_wire[key];
     let satisfied = &satisfied_wire[key];
     assert_ne!(open_detail["state"], satisfied["state"]);
@@ -3527,7 +3811,7 @@ fn a2a_task_distinguishes_satisfied_from_open_and_carries_assessment_history() {
 fn a2a_task_for_an_unknown_id_fails_operationally() {
     let scratch = Scratch::new();
     scratch.touch();
-    let run = scratch.run(&["a2a", "task", "pnk_000000"]);
+    let run = scratch.run(&["a2a", "task", "--ext", "v0", "pnk_000000"]);
     run.expect(1);
     assert!(run.stdout.is_empty(), "no half-written JSON on failure");
     // An empty ledger that exists is a lookup miss, not a missing ledger.
@@ -3797,7 +4081,7 @@ fn nested_meta_round_trips_through_every_read_surface_byte_for_byte() {
     let from_ls = meta_bytes(&rows.as_array().expect("an array")[0]);
 
     // 4. a2a task — the declaration's meta inside the extension block
-    let a2a = scratch.run(&["a2a", "task", &id]);
+    let a2a = scratch.run(&["a2a", "task", "--ext", "v0", &id]);
     a2a.expect(0);
     let block = a2a.json();
     let record = &block["https://github.com/azigler/pinki/ext/promise/v0/promise"];
