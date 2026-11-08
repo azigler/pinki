@@ -366,13 +366,33 @@ pub struct ExportArgs {
 #[derive(Debug, Subcommand)]
 pub enum A2aCommand {
     /// Emit the AgentCard extension block.
-    Card,
-    /// Emit the Task metadata block carrying one promise record.
+    Card {
+        /// Extension version. v0 is available for one minor release.
+        #[arg(long, value_enum, default_value_t = A2aExt::V1)]
+        ext: A2aExt,
+    },
+    /// Emit one Task metadata block carrying the requested promises.
     Task {
-        /// The promise to carry.
-        id: String,
+        /// Promise ids, carried in this order.
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+        /// Node that publishes the promises. Defaults to PINKI_NODE, then the short hostname.
+        #[arg(long, value_name = "HOST")]
+        node: Option<String>,
+        /// Seat that owns the promises. Required for v1.
+        #[arg(long, value_name = "SEAT")]
+        seat: Option<String>,
+        /// Extension version. v0 is available for one minor release.
+        #[arg(long, value_enum, default_value_t = A2aExt::V1)]
+        ext: A2aExt,
         /// Compute state as of this ISO-8601 instant. Defaults to the current second.
         #[arg(long, value_name = "ISO")]
         now: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum A2aExt {
+    V0,
+    V1,
 }

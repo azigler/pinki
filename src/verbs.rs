@@ -26,6 +26,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, IsTerminal, Read};
+use std::net::IpAddr;
+use std::process::Command as ProcessCommand;
 use std::str::FromStr;
 
 use jiff::Timestamp;
@@ -33,8 +35,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::a2a;
 use crate::cli::{
-    A2aCommand, AmendArgs, AssessArgs, Command, CorrectArgs, LsArgs, PromiseArgs, ResolveArgs,
-    Scope, ShowArgs,
+    A2aCommand, A2aExt, AmendArgs, AssessArgs, Command, CorrectArgs, LsArgs, PromiseArgs,
+    ResolveArgs, Scope, ShowArgs,
 };
 use crate::event::{CorrectAs, Event, EventBody, Resolution, RETRACTED, VIOLATED};
 use crate::export;
@@ -93,8 +95,14 @@ pub fn run(command: Command) -> Result<(), Fail> {
         Command::Show(args) => show(args),
         Command::Export(args) => export::run(args),
         Command::A2a { command } => match command {
-            A2aCommand::Card => a2a_card(),
-            A2aCommand::Task { id, now } => a2a_task(&id, now.as_deref()),
+            A2aCommand::Card { ext } => a2a_card(ext),
+            A2aCommand::Task {
+                ids,
+                node,
+                seat,
+                ext,
+                now,
+            } => a2a_task(&ids, node.as_deref(), seat.as_deref(), ext, now.as_deref()),
         },
     }
 }
@@ -1511,17 +1519,58 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
 
 // ---------------------------------------------------------------- a2a
 
-fn a2a_card() -> Result<(), Fail> {
+fn a2a_card(ext: A2aExt) -> Result<(), Fail> {
     // Nothing on stderr, nothing but JSON on stdout — these two verbs are meant to be
     // piped into an A2A client, and prose in the pipe is a bug.
     println!(
         "{}",
-        a2a::card().map_err(|e| Fail::Op(format!("could not encode the AgentCard block: {e}")))?
+        match ext {
+            A2aExt::V0 => a2a::card(),
+            A2aExt::V1 => a2a::card_v1(),
+        }
+        .map_err(|e| Fail::Op(format!("could not encode the AgentCard block: {e}")))?
     );
     Ok(())
 }
 
-fn a2a_task(id: &str, supplied_now: Option<&str>) -> Result<(), Fail> {
+fn a2a_task(
+    ids: &[String],
+    node: Option<&str>,
+    seat: Option<&str>,
+    ext: A2aExt,
+    supplied_now: Option<&str>,
+) -> Result<(), Fail> {
+    if ext == A2aExt::V0 && ids.len() != 1 {
+        return Err(Fail::Usage("--ext v0 requires exactly one ID".into()));
+    }
+    let address = if ext == A2aExt::V1 {
+        let seat = seat.ok_or_else(|| Fail::Usage("a2a task v1 requires --seat SEAT".into()))?;
+        validate_address_part("seat", seat)?;
+        let node = match node {
+            Some(value) => value.to_owned(),
+            None => match std::env::var("PINKI_NODE") {
+                Ok(value) => value,
+                Err(std::env::VarError::NotPresent) => short_hostname()?,
+                Err(err) => {
+                    return Err(Fail::Usage(format!("PINKI_NODE is not valid text: {err}")))
+                }
+            },
+        };
+        validate_address_part("node", &node)?;
+        if node.parse::<IpAddr>().is_ok()
+            || (node.split('.').count() == 4
+                && node
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())))
+        {
+            return Err(Fail::Usage(format!(
+                "node `{node}` looks like an IP address; use a host name"
+            )));
+        }
+        Some((node, seat))
+    } else {
+        None
+    };
     let instant = match supplied_now {
         Some(value) => Timestamp::from_str(value.trim()).map_err(|e| {
             Fail::Usage(format!(
@@ -1535,16 +1584,46 @@ fn a2a_task(id: &str, supplied_now: Option<&str>) -> Result<(), Fail> {
         ledger::read_existing_snapshot().map_err(|e| Fail::Op(e.to_string()))?;
     let ledger_ref = a2a::ledger_ref(&contents);
     let folded = fold(&events, now);
-    let view = folded.get(id).ok_or_else(|| unknown_id(id, "a2a task"))?;
-
-    // Use the same read model as `show --json`. Its `state` is pinki's computed
-    // promise state, not the A2A TaskStatus state.
-    println!(
-        "{}",
-        a2a::task_metadata(&detail(view), &now.to_string(), &ledger_ref)
-            .map_err(|e| Fail::Op(format!("could not encode the Task metadata block: {e}")))?
-    );
+    let views: Vec<_> = ids
+        .iter()
+        .map(|id| folded.get(id).ok_or_else(|| unknown_id(id, "a2a task")))
+        .collect::<Result<_, _>>()?;
+    // `detail` is the same read model as `show --json`. Resolve every id
+    // before printing, so a missing id yields no partial metadata.
+    let details: Vec<_> = views.iter().map(|view| detail(view)).collect();
+    let encoded = match address {
+        Some((node, seat)) => {
+            a2a::task_metadata_v1(&details, ids, &node, seat, &now.to_string(), &ledger_ref)
+        }
+        None => a2a::task_metadata(&details[0], &now.to_string(), &ledger_ref),
+    }
+    .map_err(|e| Fail::Op(format!("could not encode the Task metadata block: {e}")))?;
+    println!("{encoded}");
     Ok(())
+}
+
+fn validate_address_part(name: &str, value: &str) -> Result<(), Fail> {
+    if value.is_empty() || value.contains(':') || value.chars().any(char::is_whitespace) {
+        return Err(Fail::Usage(format!(
+            "{name} must be non-empty and contain no colon or whitespace"
+        )));
+    }
+    Ok(())
+}
+
+fn short_hostname() -> Result<String, Fail> {
+    let output = ProcessCommand::new("hostname")
+        .arg("-s")
+        .output()
+        .map_err(|e| Fail::Op(format!("cannot read short hostname: {e}")))?;
+    if !output.status.success() {
+        return Err(Fail::Op(
+            "cannot read short hostname with `hostname -s`".into(),
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map(|name| name.trim_end_matches(['\r', '\n']).to_owned())
+        .map_err(|e| Fail::Op(format!("short hostname is not UTF-8: {e}")))
 }
 
 // ---------------------------------------------------------------- shared

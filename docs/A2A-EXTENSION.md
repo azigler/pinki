@@ -1,6 +1,7 @@
 # pinki as an A2A extension
 
-> **v0 draft. The extension URI is provisional — see [§6](#6-the-uri-is-provisional).**
+> **v1 is the default CLI binding. v0 is deprecated and will be removed in the next minor release.**
+> The URI remains provisional — see [§6](#6-the-uri-is-provisional).
 > Read [DESIGN.md](DESIGN.md) first; this document only describes how that vocabulary
 > rides [A2A](https://a2a-protocol.org).
 
@@ -8,6 +9,52 @@ Everything below was checked against the normative source — `specification/a2a
 in [a2aproject/A2A](https://github.com/a2aproject/A2A) — and the
 [extensions guide](https://a2a-protocol.org/latest/topics/extensions/), on 2026-08-28.
 Where the spec says *should* rather than *must*, this document says so too.
+
+## v1: one metadata key, an ordered promise list
+
+The v1 URI is `https://github.com/azigler/pinki/ext/promise/v1`. It uses the
+same three A2A surfaces described below. An AgentCard declares that URI with
+`required: false`; a client activates it with the `A2A-Extensions` header; a
+Task carries one metadata key, `<v1 URI>/promises`. The value is an array of
+promise read records in the order requested. An array with one record is still
+an array. A Task can therefore carry several promises.
+
+Each record has the declaration fields from [DESIGN.md §1](DESIGN.md#1-the-record)
+and the computed fields from `show --json`. It also has `node` (the publishing
+host name), `qid` (`HOST:SEAT:ID`), and `provenance` with `as_of` and
+`ledger_ref`. `qid` is a `host:seat` address with the promise id appended. The
+bare `id` stays in the record. The reference is
+`HOST:sha256:<digest>`; the digest covers the same ledger bytes as v0. All
+records in one response have the same ledger reference and read instant.
+
+```json
+{
+  "https://github.com/azigler/pinki/ext/promise/v1/promises": [
+    {
+      "id": "pnk_4f3a91", "promise": "hand back a reviewed schema",
+      "by": "reviewer", "to": "author", "until": "2026-09-01T17:00:00Z",
+      "ts": "2026-08-28T20:14:03Z", "state": "detached",
+      "horizons": [{"ts": "2026-08-28T20:14:03Z", "until": "2026-09-01T17:00:00Z", "by": "reviewer"}],
+      "resolution": null, "corrections": [], "assessments": [],
+      "node": "box", "qid": "box:reviewer:pnk_4f3a91",
+      "provenance": {"as_of": "2026-09-01T16:05:00Z", "ledger_ref": "box:sha256:<ledger-snapshot-digest>"}
+    }
+  ]
+}
+```
+
+The example shows the container and address fields. Run `pinki a2a card` for the v1
+declaration and `pinki a2a task --node HOST --seat SEAT ID [ID ...]` for the
+metadata block. `--seat` is required for v1. `--node` defaults to `PINKI_NODE`,
+then the short host name (from `hostname -s`). A set but empty `PINKI_NODE` is an
+error, not a fallback. Node and seat must be non-empty and have no colon or
+whitespace. IP addresses cannot be nodes. `--now ISO` fixes `as_of` as in v0.
+An unknown id fails the whole command with no metadata on stdout.
+
+For one minor release, `pinki a2a card --ext v0` and `pinki a2a task --ext v0 ID`
+emit the original v0 blocks byte for byte. v0 is deprecated and will be removed
+in the next minor release. The sections below retain its original record and
+examples as the compatibility reference.
 
 ## 0. Why an extension at all
 
@@ -122,13 +169,13 @@ On a `Task` whose work a promise is about (excerpt showing the metadata block):
 ```
 
 One key, one value. The declaration fields remain at the same path, and `pinki
-a2a task` adds the same computed read fields as `show --json`: `ts`, optional
+a2a task --ext v0` adds the same computed read fields as `show --json`: `ts`, optional
 timestamp `source`, `state`, `horizons`, `resolution`, and `assessments`. An open
 promise has `resolution: null`; a satisfied one carries its resolution and evidence.
 The `state` here is pinki's computed promise state, **not** `TaskStatus.state`.
 It is true **as of** `provenance.as_of` only. A receiver uses that UTC instant to
 judge whether the computed state is stale before relying on it. `pinki a2a task
---now ISO ID` fixes the instant to a UTC second for reproducible output; without
+--ext v0 --now ISO ID` fixes the instant to a UTC second for reproducible output; without
 `--now`, pinki uses the current UTC second. `provenance.ledger_ref` is an opaque
 `sha256:` reference to the ledger snapshot that supplied the read model. It changes
 when that snapshot changes, stays the same for a copied ledger, and never exposes a
@@ -139,7 +186,7 @@ detected.
 
 The optional `source` on the declaration, horizons, resolution, and assessments
 uses the same names and values as `show --json`. At most one promise per Task
-rides under this extension. After an `amend`, the declaration's `until` here is
+rides under v0. After an `amend`, the declaration's `until` here is
 the current horizon.
 
 The record may also carry `meta`: an optional, opaque object that the declaring
@@ -228,9 +275,11 @@ it cannot assess it, not that it should be given a privileged seat.
 An agent conforms if it:
 
 1. Declares the URI in `capabilities.extensions` with `required: false`.
-2. Puts at most one promise record per Task under the URI-prefixed `metadata` key,
-   in the shape [DESIGN.md § 1](DESIGN.md#1-the-record) defines — carrying the
-   record's `meta` through untouched if it has one, and never depending on it.
+2. For v1, puts promises under the URI-prefixed `metadata` key as a list; each
+   record carries `node` and `qid` as well as the read model and provenance.
+   Carries a record's `meta` through untouched if it has one, without depending
+   on it. For deprecated v0, puts at most one promise record per Task under its
+   `/promise` key.
 3. Attaches ≥1 `Artifact` when completing a Task that carries a promise.
 4. Puts a non-empty reason in `TaskStatus.message` when rejecting or cancelling one.
 5. Never enters a task state to signal that a deadline passed.
@@ -243,8 +292,10 @@ observable, which is the most any of this was ever going to offer.
 
 ## 6. The URI is provisional
 
-`https://github.com/azigler/pinki/ext/promise/v0` is a placeholder chosen because it
-is an origin the project actually controls. A2A places no scheme or domain
+`https://github.com/azigler/pinki/ext/promise/v1` is the current URI; `v0` was the
+first, and the move from v0 to v1 (a list replaced the single record) is the rule
+below applied once already. Both are placeholders chosen because they sit on an
+origin the project actually controls. A2A places no scheme or domain
 requirement on third-party extensions — *"anyone is able to define, publish, and
 implement an extension"* — but it does say the specification **should** be hosted at
 the extension's URI, and encourages a permanent identifier service such as
@@ -255,6 +306,6 @@ Official extensions live under `https://a2a-protocol.org/extensions/`, in the
 decision this repo can make for itself.
 
 Also normative and worth stating early: **a breaking change MUST use a new URI.**
-Hence `v0`, and hence the expectation that it will move.
+Hence `v0`, then `v1`, and hence the expectation that it will move again.
 
 This is [open question 1](DESIGN.md#8-open-questions). Opinions welcome.
