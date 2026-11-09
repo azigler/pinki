@@ -11,6 +11,8 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-08
+
 ### Added
 
 - A2A promise extension v1 is the default for `a2a card` and `a2a task`.
@@ -23,7 +25,8 @@ tools can depend on them, not merely read them.
 
 ### Fixed
 
-- The README's install lines now name v0.5.0, not v0.4.0.
+- The README's install lines now name v0.6.0.
+- A2A-EXTENSION.md states the trust-boundary rule for `ledger_ref` and `as_of` directly.
 - `scripts/check-readme.sh` now builds the tree it checks (`cargo build --release --locked`) unless
   `PINKI_BIN` is set. A leftover `target/release` build or an older installed `pinki` can no
   longer make the check fail, or pass, falsely.
@@ -456,7 +459,8 @@ The nucleus: enough of pinki to actually use, and enough tests to believe it.
   not run while the suite is green. An unexplained gap and a deliberate one look
   identical in a coverage report; these are on the record as deliberate.
 
-[Unreleased]: https://github.com/azigler/pinki/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/azigler/pinki/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/azigler/pinki/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/azigler/pinki/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/azigler/pinki/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/azigler/pinki/compare/v0.2.0...v0.3.0

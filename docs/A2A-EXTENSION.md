@@ -180,9 +180,8 @@ judge whether the computed state is stale before relying on it. `pinki a2a task
 `sha256:` reference to the ledger snapshot that supplied the read model. It changes
 when that snapshot changes, stays the same for a copied ledger, and never exposes a
 local filesystem path. Compare it with a fresh reference from the authoritative
-ledger when one is available. Consul's 2026-08-29 A2A ruling requires the record
-verbatim plus `{ledger_ref, as_of}` across a trust boundary so a stale copy can be
-detected.
+ledger when one is available. Across a trust boundary, send the record verbatim
+plus `{ledger_ref, as_of}`, so that the reader can detect a stale copy.
 
 The optional `source` on the declaration, horizons, resolution, and assessments
 uses the same names and values as `show --json`. At most one promise per Task
