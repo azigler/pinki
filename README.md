@@ -183,9 +183,15 @@ requested id order (the ids come from the ledger):
   "resolution": {"as":"satisfied","ts":"2026-08-30T12:00:00Z","source":"cli","by":"https://example.org/agents/reviewer","evidence":["https://example.org/reviews/schema-91"]},
   "corrections": [], "assessments": [],
   "node": "example-host", "qid": "example-host:reviewer:pnk_4f3a91",
-  "provenance": {"as_of": "2026-08-30T12:05:00Z", "ledger_ref": "example-host:sha256:<ledger-snapshot-digest>"}
+  "provenance": {"as_of": "2026-08-30T12:05:00Z", "ledger_ref": "example-host:sha256:<ledger-snapshot-digest>",
+                 "record_ref": "example-host:sha256:<this-promise-digest>"}
 }]}
 ```
+
+`ledger_ref` covers the whole ledger, so any write anywhere changes it.
+`record_ref` covers only this promise's own history: re-read when `ledger_ref`
+differs, and treat a held copy as changed only when `record_ref` differs
+([A2A-EXTENSION.md](docs/A2A-EXTENSION.md) has the rule).
 
 Pass more ids to carry more records in the same array. These are pinki promise
 fields, not A2A Task status. An open promise has a computed open `state` and

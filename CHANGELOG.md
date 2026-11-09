@@ -11,6 +11,21 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Added
+
+- A2A v1 records carry `provenance.record_ref` beside `ledger_ref`:
+  `HOST:sha256:<digest>` over only that promise's own ledger lines (its
+  declaration, amends, resolution, corrections and assessments, plus the
+  declaration, resolution and corrections of its `on` antecedents). It does not
+  change when another promise is written, so a client can tell a changed promise
+  from a changed ledger. `ledger_ref` is unchanged, and v1 keeps its URI: the
+  field is additive. A2A-EXTENSION.md defines the rule and how to compare.
+
+### Changed
+
+- `a2a task --ext v0` now refuses `--node` and `--seat` with a usage error
+  (exit 2). Both flags apply to v1 only; v0 output is unchanged.
+
 ## [0.6.0] - 2026-11-08
 
 ### Added

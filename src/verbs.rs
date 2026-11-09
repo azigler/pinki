@@ -1543,6 +1543,11 @@ fn a2a_task(
     if ext == A2aExt::V0 && ids.len() != 1 {
         return Err(Fail::Usage("--ext v0 requires exactly one ID".into()));
     }
+    if ext == A2aExt::V0 && (node.is_some() || seat.is_some()) {
+        return Err(Fail::Usage(
+            "--node and --seat apply to v1 only; drop them with --ext v0".into(),
+        ));
+    }
     let address = if ext == A2aExt::V1 {
         let seat = seat.ok_or_else(|| Fail::Usage("a2a task v1 requires --seat SEAT".into()))?;
         validate_address_part("seat", seat)?;
@@ -1593,7 +1598,19 @@ fn a2a_task(
     let details: Vec<_> = views.iter().map(|view| detail(view)).collect();
     let encoded = match address {
         Some((node, seat)) => {
-            a2a::task_metadata_v1(&details, ids, &node, seat, &now.to_string(), &ledger_ref)
+            let record_refs: Vec<String> = ids
+                .iter()
+                .map(|id| a2a::record_ref(&events, &contents, id))
+                .collect();
+            a2a::task_metadata_v1(
+                &details,
+                ids,
+                &node,
+                seat,
+                &now.to_string(),
+                &ledger_ref,
+                &record_refs,
+            )
         }
         None => a2a::task_metadata(&details[0], &now.to_string(), &ledger_ref),
     }
