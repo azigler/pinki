@@ -64,9 +64,12 @@ Two references ride in `provenance`, and they answer different questions.
   A difference means "re-read, something in the ledger changed". It does not
   mean this promise changed.
 - `record_ref` names **this promise's own history**. It is `HOST:sha256:<digest>`
-  with the same node prefix as `ledger_ref`. It changes when, and only when, a
-  line that can change this promise's computed record is appended. A write to
-  another promise does not change it.
+  with the same node prefix as `ledger_ref`. It changes whenever a line that can
+  change this promise's computed record is appended. A write to another promise
+  does not change it. It can also change on a line the fold then ignores (a
+  re-declaration of the same id, or a correction of an antecedent by someone
+  other than its resolver); that errs toward a re-read, never toward a missed
+  change.
 
 A client that holds a copy compares both with a fresh read from the
 authoritative node: **re-read if `ledger_ref` differs; this promise changed only
