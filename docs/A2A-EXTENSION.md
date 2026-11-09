@@ -22,10 +22,12 @@ an array. A Task can therefore carry several promises.
 Each record has the declaration fields from [DESIGN.md §1](DESIGN.md#1-the-record)
 and the computed fields from `show --json`. It also has `node` (the publishing
 host name), `qid` (`HOST:SEAT:ID`), and `provenance` with `as_of` and
-`ledger_ref`. `qid` is a `host:seat` address with the promise id appended. The
-bare `id` stays in the record. The reference is
-`HOST:sha256:<digest>`; the digest covers the same ledger bytes as v0. All
-records in one response have the same ledger reference and read instant.
+`ledger_ref` and `record_ref`. `qid` is a `host:seat` address with the promise
+id appended. The bare `id` stays in the record. `ledger_ref` is
+`HOST:sha256:<digest>`; the digest covers the same ledger bytes as v0, the
+whole ledger. All records in one response have the same ledger reference and
+read instant. `record_ref` is the per-promise reference; see
+[Comparing a held copy](#comparing-a-held-copy-ledger_ref-and-record_ref).
 
 ```json
 {
@@ -37,7 +39,8 @@ records in one response have the same ledger reference and read instant.
       "horizons": [{"ts": "2026-08-28T20:14:03Z", "until": "2026-09-01T17:00:00Z", "by": "reviewer"}],
       "resolution": null, "corrections": [], "assessments": [],
       "node": "box", "qid": "box:reviewer:pnk_4f3a91",
-      "provenance": {"as_of": "2026-09-01T16:05:00Z", "ledger_ref": "box:sha256:<ledger-snapshot-digest>"}
+      "provenance": {"as_of": "2026-09-01T16:05:00Z", "ledger_ref": "box:sha256:<ledger-snapshot-digest>",
+                     "record_ref": "box:sha256:<this-promise-digest>"}
     }
   ]
 }
@@ -45,11 +48,73 @@ records in one response have the same ledger reference and read instant.
 
 The example shows the container and address fields. Run `pinki a2a card` for the v1
 declaration and `pinki a2a task --node HOST --seat SEAT ID [ID ...]` for the
-metadata block. `--seat` is required for v1. `--node` defaults to `PINKI_NODE`,
+metadata block. `--seat` is required for v1. `--node` and `--seat` mean nothing
+in v0, so `--ext v0` refuses them with a usage error (exit 2). `--node` defaults to `PINKI_NODE`,
 then the short host name (from `hostname -s`). A set but empty `PINKI_NODE` is an
 error, not a fallback. Node and seat must be non-empty and have no colon or
 whitespace. IP addresses cannot be nodes. `--now ISO` fixes `as_of` as in v0.
 An unknown id fails the whole command with no metadata on stdout.
+
+### Comparing a held copy: `ledger_ref` and `record_ref`
+
+Two references ride in `provenance`, and they answer different questions.
+
+- `ledger_ref` names the **whole ledger**. A write to any promise by any seat
+  changes it, so it differs on every held copy within minutes on a busy ledger.
+  A difference means "re-read, something in the ledger changed". It does not
+  mean this promise changed.
+- `record_ref` names **this promise's own history**. It is `HOST:sha256:<digest>`
+  with the same node prefix as `ledger_ref`. It changes whenever a line that can
+  change this promise's computed record is appended. A write to another promise
+  does not change it. It can also change on a line the fold then ignores (a
+  re-declaration of the same id, or a correction of an antecedent by someone
+  other than its resolver); that errs toward a re-read, never toward a missed
+  change.
+
+A client that holds a copy compares both with a fresh read from the
+authoritative node: **re-read if `ledger_ref` differs; this promise changed only
+if `record_ref` differs.** Equal `record_ref` means the held record is current in
+every field except the time-dependent ones (`state` can still turn `overdue`;
+judge that with `as_of`, as before). Equal `ledger_ref` means nothing in the
+ledger changed, and implies equal `record_ref`. Compare references only when
+both carry the same node prefix.
+
+For example, a client holds promises `a` and `b`:
+
+```text
+held:   a  ledger_ref box:sha256:1111  record_ref box:sha256:aaaa
+        b  ledger_ref box:sha256:1111  record_ref box:sha256:bbbb
+fresh:  a  ledger_ref box:sha256:2222  record_ref box:sha256:a2a2   <- a was amended
+        b  ledger_ref box:sha256:2222  record_ref box:sha256:bbbb   <- b is unchanged
+```
+
+`ledger_ref` differs for both, so the client re-reads. Only `a` has a new
+`record_ref`, so only `a`'s held copy is stale. `b` is the same record.
+
+**The rule for "this promise's own history".** The digest is SHA-256 over the
+selected ledger lines in log order. Each line is hashed as it stands in the file
+(no re-serialization), without its line terminator, followed by one `\n`. The
+selected lines are:
+
+1. Every event whose subject is this promise: its `promise` declaration, and
+   every `amend`, `resolve`, `correct` and `assess` line that names it.
+2. For each antecedent reachable through the `on` chain from this promise (an
+   id's first declaration supplies its `on`; a cycle is followed once): that
+   antecedent's `promise`, `resolve` and `correct` lines. Those can change this
+   promise's computed `state` (an antecedent that ends unsatisfied expires its
+   dependents). The antecedent's `amend` and `assess` lines are not selected: a
+   dependent's state reads only whether its antecedent is satisfied, ended
+   unsatisfied, or still open.
+
+Lines of an event type the publisher does not know are never selected; the fold
+ignores them. The same selected lines in a copied ledger give the same digest,
+and a path never appears in it.
+
+`record_ref` is an additive field inside v1. It is not a new URI, because it
+changes no existing field and removes nothing (see [§6](#6-the-uri-is-provisional)).
+A reader that does not know `record_ref` ignores it and falls back to
+`ledger_ref`. A v1 reader **must** ignore `provenance` fields it does not know.
+`ledger_ref` keeps its value and meaning. v0 has no `record_ref`.
 
 For one minor release, `pinki a2a card --ext v0` and `pinki a2a task --ext v0 ID`
 emit the original v0 blocks byte for byte. v0 is deprecated and will be removed
@@ -276,6 +341,9 @@ An agent conforms if it:
 1. Declares the URI in `capabilities.extensions` with `required: false`.
 2. For v1, puts promises under the URI-prefixed `metadata` key as a list; each
    record carries `node` and `qid` as well as the read model and provenance.
+   Should put `provenance.record_ref` beside `ledger_ref` on each v1 record;
+   a publisher without it is still conformant, and a reader then has only the
+   coarse `ledger_ref`.
    Carries a record's `meta` through untouched if it has one, without depending
    on it. For deprecated v0, puts at most one promise record per Task under its
    `/promise` key.

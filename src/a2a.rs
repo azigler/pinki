@@ -10,10 +10,12 @@
 //! which would reorder the promise record away from DESIGN.md §1's field order,
 //! while serializing a struct directly preserves declaration order.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+use crate::event::{Event, EventBody};
 
 #[cfg(test)]
 use crate::record::Promise;
@@ -95,18 +97,25 @@ pub fn task_metadata_v1<T: Serialize>(
     seat: &str,
     as_of: &str,
     ledger_ref: &str,
+    record_refs: &[String],
 ) -> Result<String, serde_json::Error> {
     let reference = format!("{node}:{ledger_ref}");
+    let record_refs: Vec<String> = record_refs
+        .iter()
+        .map(|digest| format!("{node}:{digest}"))
+        .collect();
     let promises: Vec<_> = details
         .iter()
         .zip(ids)
-        .map(|(detail, id)| V1TaskValue {
+        .zip(&record_refs)
+        .map(|((detail, id), record_ref)| V1TaskValue {
             detail,
             node,
             qid: format!("{node}:{seat}:{id}"),
-            provenance: Provenance {
+            provenance: V1Provenance {
                 as_of,
                 ledger_ref: &reference,
+                record_ref,
             },
         })
         .collect();
@@ -122,6 +131,69 @@ pub fn ledger_ref(contents: &str) -> String {
     format!("sha256:{digest:x}")
 }
 
+/// A path-free reference to one promise's own history: the `sha256:` digest of the
+/// ledger lines that can change this promise's computed read model, in log order.
+///
+/// `events` and `contents` must be the pair [`crate::ledger::read_existing_snapshot`]
+/// returned: one event per non-blank line of `contents`, in the same order.
+///
+/// The selected lines are:
+///
+/// - every event whose subject is `id`: its declaration (and any re-declaration),
+///   `amend`, `resolve`, `correct` and `assess` lines; and
+/// - for each antecedent reachable through the `on` chain (the first declaration of
+///   an id supplies its `on`; a cycle is visited once), the events that can change a
+///   dependent's computed state: that antecedent's `promise`, `resolve` and
+///   `correct` lines. Its `amend` and `assess` lines are left out, because a
+///   dependent's state reads only whether the antecedent is satisfied, ended
+///   unsatisfied, or still open.
+///
+/// Lines of an event type this build does not know are never selected: the fold
+/// ignores them, so they change no read model. Each selected line is hashed as it
+/// stands in the file, without its line terminator and followed by one `\n`, so the
+/// digest does not depend on re-serialization and survives a copied ledger. The
+/// caller adds the node prefix, as for the ledger reference.
+pub fn record_ref(events: &[Event], contents: &str, id: &str) -> String {
+    let lines: Vec<&str> = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    debug_assert_eq!(lines.len(), events.len());
+
+    let mut first_on: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    for event in events {
+        if let EventBody::Promise(record) = &event.body {
+            first_on
+                .entry(record.id.as_str())
+                .or_insert(record.on.as_deref());
+        }
+    }
+    let mut chain: BTreeSet<&str> = BTreeSet::new();
+    let mut next = Some(id);
+    while let Some(current) = next {
+        if !chain.insert(current) {
+            break;
+        }
+        next = first_on.get(current).copied().flatten();
+    }
+
+    let mut hasher = Sha256::new();
+    for (event, line) in events.iter().zip(&lines) {
+        let subject = event.subject();
+        let selected = subject == id
+            || (chain.contains(subject)
+                && matches!(
+                    event.body,
+                    EventBody::Promise(_) | EventBody::Resolve { .. } | EventBody::Correct { .. }
+                ));
+        if selected {
+            hasher.update(line.as_bytes());
+            hasher.update(b"\n");
+        }
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 #[derive(Serialize)]
 struct TaskValue<'a, T: Serialize> {
     #[serde(flatten)]
@@ -135,7 +207,16 @@ struct V1TaskValue<'a, T: Serialize> {
     detail: &'a T,
     node: &'a str,
     qid: String,
-    provenance: Provenance<'a>,
+    provenance: V1Provenance<'a>,
+}
+
+/// v1 provenance: `ledger_ref` is the coarse whole-ledger reference, `record_ref`
+/// the per-promise one. `record_ref` is an additive v1 field.
+#[derive(Serialize)]
+struct V1Provenance<'a> {
+    as_of: &'a str,
+    ledger_ref: &'a str,
+    record_ref: &'a str,
 }
 
 #[derive(Serialize)]

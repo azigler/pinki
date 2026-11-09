@@ -3530,6 +3530,198 @@ fn a2a_v1_ledger_reference_changes_after_amend_but_qid_does_not() {
     assert_eq!(after[V1_KEY][0]["until"], "2098-01-01T00:00:00Z");
 }
 
+const FIXED_NOW: &str = "2026-09-01T16:05:00Z";
+
+/// `(ledger_ref, record_ref)` for each id, in order, as `a2a task` v1 prints them.
+fn v1_refs(scratch: &Scratch, node: &str, ids: &[&str]) -> Vec<(String, String)> {
+    let mut args = vec!["a2a", "task", "--node", node, "--seat", "aaif"];
+    args.extend_from_slice(ids);
+    args.extend_from_slice(&["--now", FIXED_NOW]);
+    let run = scratch.run(&args);
+    run.expect(0);
+    run.json()[V1_KEY]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|record| {
+            let provenance = &record["provenance"];
+            (
+                provenance["ledger_ref"].as_str().unwrap().to_owned(),
+                provenance["record_ref"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a2a_v1_record_ref_moves_only_with_its_own_promise() {
+    let scratch = Scratch::new();
+    let a = scratch.promise("a", "debtor", "creditor", FUTURE);
+    let b = scratch.promise("b", "debtor", "creditor", FUTURE);
+    let before = v1_refs(&scratch, "box", &[&a, &b]);
+    for (_, record_ref) in &before {
+        assert!(record_ref.starts_with("box:sha256:"));
+        assert_eq!(record_ref.len(), "box:sha256:".len() + 64);
+    }
+    assert_ne!(before[0].1, before[1].1);
+    scratch
+        .run(&["amend", &a, "--until", "2098-01-01T00:00:00Z"])
+        .expect(0);
+    let after = v1_refs(&scratch, "box", &[&a, &b]);
+    assert_ne!(
+        before[0].1, after[0].1,
+        "A's own amend moves A's record_ref"
+    );
+    assert_eq!(before[1].1, after[1].1, "B's record_ref must not move");
+    assert_ne!(before[0].0, after[0].0, "the ledger_ref moves for A");
+    assert_ne!(before[1].0, after[1].0, "the ledger_ref moves for B too");
+    assert_eq!(after[0].0, after[1].0, "one ledger_ref per response");
+}
+
+#[test]
+fn a2a_v1_record_ref_moves_on_assess_and_on_resolve() {
+    let scratch = Scratch::new();
+    let a = scratch.promise("a", "debtor", "creditor", FUTURE);
+    let b = scratch.promise("b", "debtor", "creditor", FUTURE);
+    let start = v1_refs(&scratch, "box", &[&a, &b]);
+    scratch
+        .run(&["assess", &a, "--violated", "--observer", "creditor"])
+        .expect(0);
+    let assessed = v1_refs(&scratch, "box", &[&a, &b]);
+    assert_ne!(start[0].1, assessed[0].1, "an assessment moves A");
+    assert_eq!(start[1].1, assessed[1].1);
+    scratch
+        .run(&[
+            "resolve",
+            &a,
+            "--satisfied",
+            "--evidence",
+            "https://example.org/e",
+        ])
+        .expect(0);
+    let resolved = v1_refs(&scratch, "box", &[&a, &b]);
+    assert_ne!(assessed[0].1, resolved[0].1, "a resolution moves A");
+    assert_eq!(assessed[1].1, resolved[1].1);
+}
+
+#[test]
+fn a2a_v1_record_ref_follows_the_on_chain_for_state_changing_events_only() {
+    let scratch = Scratch::new();
+    let a = scratch.promise("a", "debtor", "creditor", FUTURE);
+    let b = scratch
+        .run(&[
+            "promise", "b", "--by", "debtor", "--to", "creditor", "--until", FUTURE, "--on", &a,
+        ])
+        .id();
+    let c = scratch.promise("c", "debtor", "creditor", FUTURE);
+    let start = v1_refs(&scratch, "box", &[&a, &b, &c]);
+    // An amend or an assessment of the antecedent cannot change B's state.
+    scratch
+        .run(&["amend", &a, "--until", "2098-01-01T00:00:00Z"])
+        .expect(0);
+    scratch
+        .run(&["assess", &a, "--violated", "--observer", "creditor"])
+        .expect(0);
+    let side = v1_refs(&scratch, "box", &[&a, &b, &c]);
+    assert_ne!(start[0].1, side[0].1);
+    assert_eq!(start[1].1, side[1].1);
+    // A resolution of the antecedent does: B goes from conditional to expired.
+    scratch
+        .run(&["resolve", &a, "--cancelled", "--reason", "withdrawn"])
+        .expect(0);
+    let resolved = v1_refs(&scratch, "box", &[&a, &b, &c]);
+    assert_ne!(
+        side[1].1, resolved[1].1,
+        "the antecedent's resolution moves B"
+    );
+    assert_eq!(
+        start[2].1, resolved[2].1,
+        "an unrelated promise never moves"
+    );
+}
+
+#[test]
+fn a2a_v1_same_history_on_two_nodes_gives_different_record_refs() {
+    let one = Scratch::new();
+    let two = Scratch::new();
+    for scratch in [&one, &two] {
+        scratch.touch();
+        fs::write(scratch.ledger(), FIXED_LEDGER).unwrap();
+    }
+    let on_box = v1_refs(&one, "box", &["a", "b"]);
+    let on_pico = v1_refs(&two, "pico", &["a", "b"]);
+    for ((box_ledger, box_record), (pico_ledger, pico_record)) in on_box.iter().zip(&on_pico) {
+        assert_ne!(box_record, pico_record);
+        assert_ne!(box_ledger, pico_ledger);
+        assert_eq!(
+            box_record.strip_prefix("box:"),
+            pico_record.strip_prefix("pico:")
+        );
+    }
+}
+
+/// Three hand-written lines: A declared, B declared, A amended.
+const FIXED_LEDGER: &str = concat!(
+    r#"{"ts":"2026-08-28T00:00:00Z","type":"promise","id":"a","promise":"first","by":"debtor","to":"creditor","until":"2099-01-01T00:00:00Z"}"#,
+    "\n",
+    r#"{"ts":"2026-08-28T00:01:00Z","type":"promise","id":"b","promise":"second","by":"debtor","to":"creditor","until":"2099-01-01T00:00:00Z"}"#,
+    "\n",
+    r#"{"ts":"2026-08-28T00:02:00Z","type":"amend","promise":"a","by":"debtor","until":"2099-02-01T00:00:00Z"}"#,
+    "\n",
+);
+
+#[test]
+fn a2a_v1_exact_digests_for_a_fixed_ledger() {
+    let scratch = Scratch::new();
+    scratch.touch();
+    fs::write(scratch.ledger(), FIXED_LEDGER).unwrap();
+    let refs = v1_refs(&scratch, "box", &["a", "b"]);
+    // Pinned from an independent computation: sha256 of the whole file for the
+    // ledger_ref; sha256 of lines 1+3 (A) and line 2 (B), each followed by "\n", for
+    // the record_ref.
+    let ledger = "box:sha256:0b6592970c63073daf0f2309e4d141a2c229510d3597cff221ca7932dc768fef";
+    assert_eq!(refs[0].0, ledger);
+    assert_eq!(refs[1].0, ledger);
+    assert_eq!(
+        refs[0].1,
+        "box:sha256:3bec76c5da452c169699dc4cfbf5419deeb69bcf6e08fcd80f764eb12ff6c7d4"
+    );
+    assert_eq!(
+        refs[1].1,
+        "box:sha256:91fd6bcf4fe13fd424d90b942c663b22e126d3b05de30b3b78a50cce204ee288"
+    );
+    // The same numbers fall out of the file's own lines.
+    let lines: Vec<&str> = FIXED_LEDGER.lines().collect();
+    let digest = |picked: &[&str]| {
+        let text: String = picked.iter().map(|line| format!("{line}\n")).collect();
+        format!("box:sha256:{:x}", Sha256::digest(text.as_bytes()))
+    };
+    assert_eq!(refs[0].1, digest(&[lines[0], lines[2]]));
+    assert_eq!(refs[1].1, digest(&[lines[1]]));
+}
+
+#[test]
+fn a2a_v0_carries_no_record_ref_and_refuses_node_and_seat() {
+    let scratch = Scratch::new();
+    scratch.touch();
+    fs::write(scratch.ledger(), FIXED_LEDGER).unwrap();
+    let v0 = scratch.run(&["a2a", "task", "--ext", "v0", "a", "--now", FIXED_NOW]);
+    v0.expect(0);
+    assert!(!v0.stdout.contains("record_ref"));
+    assert!(v0.stdout.contains(&format!(
+        "\"ledger_ref\": \"sha256:{:x}\"",
+        Sha256::digest(FIXED_LEDGER.as_bytes())
+    )));
+    for extra in [["--node", "box"], ["--seat", "aaif"]] {
+        let mut args = vec!["a2a", "task", "--ext", "v0", "a"];
+        args.extend_from_slice(&extra);
+        let run = scratch.run(&args);
+        run.expect(2);
+        assert!(run.stdout.is_empty());
+        assert!(run.stderr.contains("v1"), "{}", run.stderr);
+    }
+}
+
 #[test]
 fn a2a_card_is_json_on_stdout_and_silence_on_stderr() {
     let scratch = Scratch::new();
