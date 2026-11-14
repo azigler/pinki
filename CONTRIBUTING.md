@@ -86,6 +86,26 @@ this project moves. Outside PRs aren't forbidden — see the mechanics below —
 you just want the thing fixed or the idea considered, the issue alone is a complete
 contribution, and usually the faster path.
 
+### Cutting a release (maintainer)
+
+Two scripts in `tools/` do the mechanical part, so nobody retypes it:
+
+- `tools/release-prep.sh [--dry-run] <version>` checks you are on a clean, current
+  `main`, bumps `Cargo.toml` and `Cargo.lock`, cuts `[Unreleased]` into a dated
+  `[<version>]` section of `CHANGELOG.md`, runs the CI gates (build, fmt, clippy,
+  tests, README examples, the 97% line-coverage bar), and then stops. It never
+  commits, tags or pushes. You write the section's intro paragraph and the
+  released-tree test line, commit, tag annotated, and push `main` and the tag;
+  `release.yml` builds the tarball. `--dry-run` runs every check without writing
+  files and lists what failed. Set `PINKI_RUN_PREFIX` (e.g. `nice -n 19`) to put a
+  command in front of the heavy cargo runs.
+- `tools/uncovered-lines.py [--check]` re-derives the "what stays uncovered" block at
+  the end of `tests/cli.rs` (line numbers and the "N against 11" count) from
+  `cargo llvm-cov report --show-missing-lines`. It asserts the uncovered set is
+  exactly the eleven documented lines and stops, naming the lines, if it is not: a
+  new gap is either added to the block on purpose or closed with a test. Run
+  `cargo llvm-cov --summary-only` first; `release-prep.sh` does both.
+
 ## Where design happens
 
 In [GitHub issues](https://github.com/azigler/pinki/issues), in public, in writing.
