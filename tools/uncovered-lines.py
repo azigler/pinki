@@ -12,7 +12,7 @@ Usage:
     REPO            the pinki checkout (default: the parent of this script's directory)
     --check         write nothing; report whether the block is current
     --report FILE   read a saved `cargo llvm-cov report --show-missing-lines` output
-                    instead of running cargo (for tests and for reading old runs)
+                    instead of running cargo (for tests and saved reports from this checkout)
 
 The report needs coverage data, so run `cargo llvm-cov --summary-only` first.
 
@@ -357,6 +357,9 @@ def main() -> int:
         return 0
     except (CouldNotEvaluate, OSError) as e:
         print(f"COULD NOT EVALUATE: {e}", file=sys.stderr)
+        return 3
+    except Exception as e:
+        print(f"COULD NOT EVALUATE: unexpected {type(e).__name__}: {e}", file=sys.stderr)
         return 3
 
 

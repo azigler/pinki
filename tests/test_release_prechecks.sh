@@ -2,12 +2,14 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+real_python=$(command -v python3)
 mkdir -p "$root/target"
 scratch=$(mktemp -d "$root/target/release-prechecks.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 fixture="$scratch/fixture"
 mkdir -p "$fixture/tools" "$fixture/scripts" "$scratch/bin"
 cp "$root/tools/release-prep.sh" "$fixture/tools/"
+cp "$root/tools/uncovered-lines.py" "$fixture/tools/"
 cp "$root/Cargo.toml" "$root/CHANGELOG.md" "$fixture/"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture/scripts/check-readme.sh"
 cat > "$scratch/bin/cargo" <<'EOF'
@@ -20,6 +22,9 @@ EOF
 cat > "$scratch/bin/python3" <<'EOF'
 #!/usr/bin/env bash
 if [[ ${1:-} == tools/uncovered-lines.py ]]; then
+  if [[ ${CHECKER_BAD_REPORT:-0} == 1 ]]; then
+    exec "$REAL_PYTHON" "$1" --check --report "$BAD_REPORT"
+  fi
   if [[ ${COVERAGE_RESULT:-0} == 1 ]]; then
     printf 'comment block is STALE\n'
     exit 1
@@ -68,6 +73,20 @@ done
 printf 'release prechecks fail closed when git status, fetch, and ls-remote fail\n'
 
 git -C "$fixture" remote set-url origin "$fixture"
+printf '\377' > "$scratch/invalid-report"
+set +e
+output=$(PATH="$scratch/bin:$PATH" REAL_GIT="$(command -v git)" \
+  REAL_PYTHON="$real_python" CHECKER_BAD_REPORT=1 BAD_REPORT="$scratch/invalid-report" \
+  bash "$fixture/tools/release-prep.sh" --dry-run 9.9.9 'Fixture release' 2>&1)
+status=$?
+set -e
+[[ $status == 1 && $output == *'COULD NOT EVALUATE: unexpected UnicodeDecodeError:'* && \
+   $output == *'FAIL (dry run, continuing): tools/uncovered-lines.py --check'* ]] || {
+  printf 'invalid UTF-8 report must fail the dry-run gate\n%s\n' "$output" >&2
+  exit 1
+}
+printf 'dry run rejects a checker crash from an invalid UTF-8 report\n'
+
 set +e
 output=$(PATH="$scratch/bin:$PATH" REAL_GIT="$(command -v git)" COVERAGE_RESULT=1 \
   bash "$fixture/tools/release-prep.sh" --dry-run 9.9.9 'Fixture release' 2>&1)
