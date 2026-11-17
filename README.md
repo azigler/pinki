@@ -192,6 +192,11 @@ requested id order (the ids come from the ledger):
 `record_ref` covers only this promise's own history: re-read when `ledger_ref`
 differs, and treat a held copy as changed only when `record_ref` differs
 ([A2A-EXTENSION.md](docs/A2A-EXTENSION.md) has the rule).
+`record_ref` is on `main` and not yet in a release: v0.6.0 emits only `ledger_ref`.
+To get it now, install from `main` (no `--tag`):
+`cargo install --git https://github.com/azigler/pinki --locked`.
+A `main` build also reports `pinki 0.6.0`, so check the output for `record_ref`,
+not the version. It ships in the next release.
 
 Pass more ids to carry more records in the same array. These are pinki promise
 fields, not A2A Task status. An open promise has a computed open `state` and
