@@ -3,7 +3,7 @@
 
 The block lists the source lines that no test executes, with the reason each one is
 deliberate, and says how many "Missed Lines" the coverage summary reports against that
-list ("N against 11"). Both go stale whenever code moves. This script re-reads them from
+list ("N against K"). Both go stale whenever code moves. This script re-reads them from
 `cargo llvm-cov report --show-missing-lines` instead of asserting remembered figures.
 
 Usage:
@@ -16,15 +16,15 @@ Usage:
 
 The report needs coverage data, so run `cargo llvm-cov --summary-only` first.
 
-The uncovered SET must be exactly the eleven known lines, identified by file and by the
+The uncovered SET must be exactly the known lines, identified by file and by the
 shape of the source text (not by line number, which moves). Any other uncovered line, or
 any known line that is now covered, means the set changed: the script stops, names the
 lines, and leaves the file alone. A human then decides whether the new gap is deliberate
 (add it to KNOWN here and to the block) or a missing test.
 
 Exit status:
-    0  the set is the eleven, and the block is current (or was just rewritten)
-    1  --check only: the set is the eleven, but the block is stale
+    0  the set is known, and the block is current (or was just rewritten)
+    1  --check only: the set is known, but the block is stale
     2  the uncovered set changed
     3  could not evaluate (no coverage data, unparseable report, comment shape changed)
 """
@@ -157,7 +157,7 @@ def run_report(repo: pathlib.Path) -> str:
     return proc.stdout
 
 
-def parse_report(text: str):
+def parse_report(text: str, repo: pathlib.Path):
     """Return (missed_lines_total, {relative file: sorted uncovered line numbers})."""
     total = re.search(
         r"^TOTAL\s+\d+\s+\d+\s+[\d.]+%\s+\d+\s+\d+\s+[\d.]+%\s+\d+\s+(\d+)",
@@ -175,10 +175,15 @@ def parse_report(text: str):
         m = re.match(r"^\s*(\S+\.rs):\s*([\d,\s]+)$", line)
         if not m:
             continue
-        rel = re.search(r"(src/\S+\.rs)$", m.group(1))
-        if not rel:
+        path = pathlib.Path(m.group(1))
+        if path.is_absolute():
+            try:
+                path = path.relative_to(repo)
+            except ValueError:
+                continue
+        if not path.parts or path.parts[0] != "src":
             continue
-        miss[rel.group(1)] = sorted(
+        miss[path.as_posix()] = sorted(
             int(x) for x in re.findall(r"\d+", m.group(2))
         )
     if not miss:
@@ -202,7 +207,7 @@ def classify(repo: pathlib.Path, miss):
         hits = []
         for start in sorted(uncovered):
             span = range(start, start + len(entry["lines"]))
-            if any(n not in uncovered or n in claimed for n in span):
+            if any(n not in uncovered or (entry["file"], n) in claimed for n in span):
                 continue
             if any(
                 n > len(src)
@@ -216,7 +221,7 @@ def classify(repo: pathlib.Path, miss):
             ):
                 continue
             hits.append(tuple(span))
-            claimed.update(span)
+            claimed.update((entry["file"], n) for n in span)
         found[entry["key"]] = hits
         if len(hits) != entry["count"]:
             problems.append(
@@ -298,7 +303,7 @@ def main() -> int:
             if args.report
             else run_report(repo)
         )
-        total, miss = parse_report(report)
+        total, miss = parse_report(report, repo)
         found, extras, problems = classify(repo, miss)
 
         derived = sorted(
@@ -316,7 +321,7 @@ def main() -> int:
 
         if extras or problems:
             print(
-                "\nFAIL: the uncovered set is not the known eleven lines.",
+                f"\nFAIL: the uncovered set is not the {known_line_count()} known lines.",
                 file=sys.stderr,
             )
             for p in problems:
@@ -344,13 +349,13 @@ def main() -> int:
             return 0
         if args.check:
             print(
-                "comment block is STALE (set is the known eleven; numbers moved)"
+                f"comment block is STALE (set is the {known_line_count()} known lines; numbers moved)"
             )
             return 1
         cli.write_text(new)
         print("comment block re-derived")
         return 0
-    except CouldNotEvaluate as e:
+    except (CouldNotEvaluate, OSError) as e:
         print(f"COULD NOT EVALUATE: {e}", file=sys.stderr)
         return 3
 
