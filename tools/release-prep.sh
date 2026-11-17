@@ -238,7 +238,7 @@ PY
 if ((dry_run)); then
   step 'version bump + CHANGELOG (checked, not written)' edit_release_files
 else
-bump_started=1
+  bump_started=1
   step 'version bump + CHANGELOG' edit_release_files --write
 fi
 

@@ -33,6 +33,12 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Release prechecks
+        run: bash tests/test_release_prechecks.sh
+
+      - name: Uncovered lines checker tests
+        run: python3 -m unittest discover -s tests -p test_uncovered_lines.py
+
       - name: README examples
         run: cargo build --release --locked && bash scripts/check-readme.sh
 

@@ -61,6 +61,20 @@ class UncoveredLinesTests(unittest.TestCase):
         self.assertEqual(result, 3)
         self.assertIn("COULD NOT EVALUATE", error.getvalue())
 
+    def test_invalid_utf8_report_is_could_not_evaluate(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            report = pathlib.Path(temporary) / "invalid-report"
+            report.write_bytes(b"\xff")
+            with mock.patch.object(
+                sys, "argv", ["uncovered-lines.py", "--report", str(report)]
+            ), contextlib.redirect_stderr(io.StringIO()) as error:
+                result = uncovered.main()
+        self.assertEqual(result, 3)
+        self.assertEqual(
+            error.getvalue().count("COULD NOT EVALUATE: unexpected UnicodeDecodeError:"),
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ Usage:
     REPO            the pinki checkout (default: the parent of this script's directory)
     --check         write nothing; report whether the block is current
     --report FILE   read a saved `cargo llvm-cov report --show-missing-lines` output
-                    instead of running cargo (for tests and for reading old runs)
+                    instead of running cargo (for tests and saved reports from this checkout)
 
 The report needs coverage data, so run `cargo llvm-cov --summary-only` first.
 
@@ -39,6 +39,14 @@ import sys
 # consecutive lines; `prev` optionally constrains the line before the first. `count` is
 # how many separate occurrences the set must contain, in file order.
 KNOWN = [
+    {
+        "key": "state_walk_missing",
+        "file": "src/state.rs",
+        "prev": r"\}",
+        "lines": [r"\}"],
+        "count": 1,
+        "why": "Every graph walk id comes from a fold view.",
+    },
     {
         "key": "state_conditional",
         "file": "src/state.rs",
@@ -76,6 +84,27 @@ KNOWN = [
         "count": 1,
     },
     {
+        "key": "verbs_correct_clap",
+        "file": "src/verbs.rs",
+        "lines": [r'_ => unreachable!\("clap validates --as"\),'],
+        "count": 1,
+        "why": "Clap accepts only the five correction outcomes before correct() runs.",
+    },
+    {
+        "key": "verbs_typed_fallbacks",
+        "file": "src/verbs.rs",
+        "lines": [r"_ => None,"],
+        "count": 4,
+        "why": "Fold event fields contain only their matching body variants.",
+    },
+    {
+        "key": "export_typed_fallbacks",
+        "file": "src/export.rs",
+        "lines": [r"_ => None,"],
+        "count": 2,
+        "why": "Fold collections contain only Assess and Correct event bodies.",
+    },
+    {
         "key": "event_panic",
         "file": "src/event.rs",
         "lines": [r'panic!\("failed to read back \{text\}: \{e\}"\);'],
@@ -92,6 +121,7 @@ KNOWN = [
 # (pattern, key, builder). Group 1 is kept, the number(s) are replaced, group 2 is kept.
 # `found[key]` is the list of start-line tuples (first..last line of each occurrence).
 COMMENT_EDITS = [
+    (r"(src/state\.rs )\d+(  graph walk)", "state_walk_missing", 0, "single"),
     (
         r"(src/state\.rs )\d+(\s+`_ => State::Conditional`)",
         "state_conditional",
@@ -134,6 +164,19 @@ COMMENT_EDITS = [
         "ledger_panic",
         None,
         "pair",
+    ),
+    (r"(src/verbs\.rs )\d+(  correction `--as`)", "verbs_correct_clap", 0, "single"),
+    (
+        r"(src/verbs\.rs )\d+(?:,\d+){3}(  typed event fallbacks)",
+        "verbs_typed_fallbacks",
+        None,
+        "list",
+    ),
+    (
+        r"(src/export\.rs )\d+,\d+(  typed event fallbacks)",
+        "export_typed_fallbacks",
+        None,
+        "list",
     ),
 ]
 
@@ -252,8 +295,8 @@ def known_line_count() -> int:
 def rewrite(text: str, found, total: int) -> str:
     for pattern, key, idx, kind in COMMENT_EDITS:
         hits = found[key]
-        if kind == "pair":
-            repl = rf"\g<1>{hits[0][0]},{hits[1][0]}\g<2>"
+        if kind in ("pair", "list"):
+            repl = rf"\g<1>{','.join(str(hit[0]) for hit in hits)}\g<2>"
         else:
             span = hits[idx]
             num = f"{span[0]}-{span[-1]}" if kind == "range" else f"{span[0]}"
@@ -357,6 +400,9 @@ def main() -> int:
         return 0
     except (CouldNotEvaluate, OSError) as e:
         print(f"COULD NOT EVALUATE: {e}", file=sys.stderr)
+        return 3
+    except Exception as e:
+        print(f"COULD NOT EVALUATE: unexpected {type(e).__name__}: {e}", file=sys.stderr)
         return 3
 
 

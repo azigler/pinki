@@ -1663,6 +1663,8 @@ fn correction_relabels_the_live_case_and_preserves_both_events_everywhere() {
             "satisfied",
             "--evidence",
             "sha:kept",
+            "--evidence",
+            "sha:also-kept",
             "--reason",
             "migration mislabelled kept work",
             "--by",
@@ -1708,6 +1710,7 @@ fn correction_relabels_the_live_case_and_preserves_both_events_everywhere() {
     assert!(text.stdout.contains("resolution   cancelled"));
     assert!(text.stdout.contains("corrections\n"));
     assert!(text.stdout.contains("sha:kept"));
+    assert!(text.stdout.contains("sha:also-kept"));
 
     let listed = scratch.run(&["ls", "--all", "--json"]);
     listed.expect(0);
@@ -5210,9 +5213,225 @@ fn supplied_amend_and_assess_sources_reach_show() {
     let detail = scratch.run(&["show", &id, "--json"]).json();
     assert_eq!(detail["horizons"][1]["source"], "supplied");
     assert_eq!(detail["assessments"][0]["source"], "supplied");
+    let text = scratch.run(&["show", &id]);
+    text.expect(0);
+    assert!(text.stdout.contains("(supplied)"));
 }
 
-// `cargo llvm-cov --summary-only --show-missing-lines` names eleven source lines that
+#[test]
+fn record_ref_handles_a_cycle_and_corrections_to_cancelled_and_refused() {
+    let scratch = Scratch::new();
+    for (id, on) in [("cycle-a", "cycle-b"), ("cycle-b", "cycle-a")] {
+        scratch
+            .run(&[
+                "promise", id, "--id", id, "--by", "debtor", "--to", "creditor", "--until", FUTURE,
+                "--on", on,
+            ])
+            .expect(0);
+    }
+    let args = ["a2a", "task", "--node", "box", "--seat", "aaif", "cycle-a"];
+    let before = scratch.run(&args).json()[V1_KEY][0]["provenance"]["record_ref"].clone();
+    scratch
+        .run(&[
+            "resolve",
+            "cycle-a",
+            "--cancelled",
+            "--reason",
+            "wrong",
+            "--by",
+            "debtor",
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "correct",
+            "cycle-a",
+            "--as",
+            "refused",
+            "--reason",
+            "will not do it",
+            "--by",
+            "debtor",
+        ])
+        .expect(0);
+    assert_eq!(state_of(&scratch, "cycle-a"), "refused");
+    let corrected_text = scratch.run(&["show", "cycle-a"]);
+    corrected_text.expect(0);
+    assert!(corrected_text.stdout.contains("source   cli"));
+    let after = scratch.run(&args).json()[V1_KEY][0]["provenance"]["record_ref"].clone();
+    assert_ne!(before, after);
+    scratch
+        .run(&[
+            "correct",
+            "cycle-a",
+            "--as",
+            "cancelled",
+            "--reason",
+            "still wrong",
+            "--by",
+            "debtor",
+        ])
+        .expect(0);
+    assert_eq!(state_of(&scratch, "cycle-a"), "cancelled");
+}
+
+#[test]
+fn malformed_ledger_instants_fail_the_specific_read_gate() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("time check", "debtor", "creditor", PAST);
+    scratch.rewrite(|_, event| {
+        event.insert("until".into(), serde_json::json!("not-an-instant"));
+    });
+    let lapsed = scratch.run(&["resolve", &id, "--lapsed", "--by", "observer"]);
+    lapsed.expect(1);
+    assert!(lapsed.stderr.contains("cannot be evaluated as an instant"));
+    scratch.rewrite(|_, event| {
+        event.insert("ts".into(), serde_json::json!("not-an-instant"));
+    });
+    let exported = scratch.run(&["export", "--since", PAST]);
+    exported.expect(1);
+    assert!(exported.stderr.contains("unreadable declaration timestamp"));
+    assert!(exported.stdout.is_empty());
+}
+
+#[test]
+fn error_inputs_are_rejected_before_a_ledger_append() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("error checks", "debtor", "creditor", PAST);
+    let before = scratch.lines();
+    for outcome in ["--lapsed", "--refused"] {
+        let evidence = scratch.run(&[
+            "resolve",
+            &id,
+            outcome,
+            "--by",
+            "debtor",
+            "--evidence",
+            "sha:x",
+        ]);
+        evidence.expect(2);
+        assert!(evidence.stderr.contains("--evidence is not accepted"));
+        let missing_by = scratch.run(&["resolve", &id, outcome]);
+        missing_by.expect(2);
+        assert!(missing_by.stderr.contains("requires --by WHO"));
+    }
+    let bad_ts = scratch.run(&[
+        "assess",
+        &id,
+        "--violated",
+        "--observer",
+        "watcher",
+        "--ts",
+        "bad",
+    ]);
+    bad_ts.expect(2);
+    assert!(bad_ts.stderr.contains("not an ISO-8601 instant"));
+    assert_eq!(scratch.lines(), before);
+
+    scratch
+        .run(&[
+            "resolve",
+            &id,
+            "--cancelled",
+            "--reason",
+            "wrong",
+            "--by",
+            "debtor",
+        ])
+        .expect(0);
+    let corrected_before = scratch.lines();
+    let blank_evidence = scratch.run(&[
+        "correct",
+        &id,
+        "--as",
+        "satisfied",
+        "--reason",
+        "fixed",
+        "--by",
+        "debtor",
+        "--evidence",
+        " ",
+    ]);
+    blank_evidence.expect(2);
+    assert!(blank_evidence
+        .stderr
+        .contains("an --evidence value is empty"));
+    let disallowed = scratch.run(&[
+        "correct",
+        &id,
+        "--as",
+        "released",
+        "--reason",
+        "fixed",
+        "--by",
+        "debtor",
+        "--evidence",
+        "sha:x",
+    ]);
+    disallowed.expect(2);
+    assert!(disallowed.stderr.contains("--evidence is not accepted"));
+    assert_eq!(scratch.lines(), corrected_before);
+}
+
+#[test]
+fn export_released_and_empty_tree_and_v0_multi_id() {
+    let scratch = Scratch::new();
+    scratch.touch();
+    let empty_tree = scratch.run(&["ls", "--tree"]);
+    empty_tree.expect(0);
+    assert!(empty_tree.stderr.contains("holds no promises"));
+    let a = scratch.promise("first", "debtor", "creditor", FUTURE);
+    let b = scratch.promise("second", "debtor", "creditor", FUTURE);
+    let multi = scratch.run(&["a2a", "task", "--ext", "v0", &a, &b]);
+    multi.expect(2);
+    assert!(multi.stderr.contains("exactly one ID"));
+    scratch.run(&["resolve", &a, "--released"]).expect(0);
+    let export = scratch.run(&["export"]);
+    export.expect(0);
+    let rows = export.json()["promises"].as_array().unwrap().clone();
+    let released = rows.iter().find(|row| row["id"] == a).unwrap();
+    assert_eq!(released["resolution"]["as"], "released");
+}
+
+#[cfg(unix)]
+#[test]
+fn a2a_reports_non_utf8_node_and_failed_hostname() {
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new();
+    let id = scratch.promise("address", "debtor", "creditor", FUTURE);
+    let args = ["a2a", "task", "--seat", "aaif", &id];
+    let bad_env = Command::new(BIN)
+        .args(args)
+        .current_dir(&scratch.dir)
+        .env("PINKI_LEDGER", scratch.ledger())
+        .env("PINKI_NODE", OsString::from_vec(vec![0xff]))
+        .output()
+        .expect("run with a non-UTF-8 node");
+    assert_eq!(bad_env.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad_env.stderr).contains("PINKI_NODE is not valid text"));
+
+    let fake_bin = scratch.dir.join("bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let hostname = fake_bin.join("hostname");
+    fs::write(&hostname, "#!/bin/sh\nexit 17\n").unwrap();
+    let mut perms = fs::metadata(&hostname).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&hostname, perms).unwrap();
+    let failed_host = Command::new(BIN)
+        .args(args)
+        .current_dir(&scratch.dir)
+        .env("PINKI_LEDGER", scratch.ledger())
+        .env_remove("PINKI_NODE")
+        .env("PATH", &fake_bin)
+        .output()
+        .expect("run with a failing hostname command");
+    assert_eq!(failed_host.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&failed_host.stderr).contains("cannot read short hostname"));
+}
+
+// `cargo llvm-cov report --show-missing-lines` names nineteen source lines that
 // no test executes. Each is listed here with the reason, because an unexplained gap and
 // a deliberate one look identical in a coverage report — and the deliberate ones should
 // stay deliberate rather than be closed by a test that asserts nothing.
@@ -5220,22 +5439,29 @@ fn supplied_amend_and_assess_sources_reach_show() {
 // Unreachable defensive code — the arm exists so the fold cannot panic on a ledger
 // somebody else wrote, and the surrounding code makes it unconstructible:
 //
-//   src/state.rs 328   `_ => State::Conditional` when a declared id has no memo entry.
+//   src/state.rs 277  graph walk finds no view. Its roots and child ids come from
+//                     the fold, which creates the corresponding views.
+//   src/state.rs 464   `_ => State::Conditional` when a declared id has no memo entry.
 //                      Every id in `order` is solved before this runs, and `solve`
 //                      only ever terminates with `Memo::Done`.
-//   src/state.rs 383-385  the dangling arm in `solve`, for an id with no record.
+//   src/state.rs 532-534  the dangling arm in `solve`, for an id with no record.
 //                      `solve` is called only for ids in `records`, and an antecedent
 //                      is `contains_key`-checked before it is pushed on the stack, so
 //                      `self.records.get(current)` is always `Some`.
-//   src/state.rs 396   `None => State::Detached` for a resolution that is not one.
+//   src/state.rs 553   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
-//   src/verbs.rs 771   `_ => None` over `view.assessments`, which `fold` fills only
+//   src/verbs.rs 789   `_ => None` over `view.assessments`, which `fold` fills only
 //                      from `EventBody::Assess` events.
+//   src/verbs.rs 616  correction `--as` fallback: clap accepts only the five outcomes.
+//   src/verbs.rs 1173,1263,1289,1340  typed event fallbacks: the fold stores only
+//                      matching event types in these read-model fields.
+//   src/export.rs 269,293  typed event fallbacks: the fold stores only Assess and
+//                      Correct events in the corresponding collections.
 //
 // Unreachable from a test harness:
 //
-//   src/verbs.rs 269   the `io::stdin().is_terminal()` refusal. A child spawned by a
+//   src/verbs.rs 295   the `io::stdin().is_terminal()` refusal. A child spawned by a
 //                      test never has a tty on stdin, and giving it one would mean a
 //                      pty dependency — which Cargo.toml exists to refuse. Exercised
 //                      by hand: `pinki promise` at a prompt.
@@ -5243,14 +5469,14 @@ fn supplied_amend_and_assess_sources_reach_show() {
 // Test-internal — the failure arm of an assertion, which by construction does not run
 // while the suite is green:
 //
-//   src/event.rs 528      `panic!` in `every_event_type_round_trips`.
-//   src/event.rs 720      `panic!` in `meta_survives_a_round_trip_on_every_event_type`.
-//   src/ledger.rs 428,441 `other => panic!("expected Malformed, …")`.
+//   src/event.rs 731      `panic!` in `every_event_type_round_trips`.
+//   src/event.rs 931      `panic!` in `meta_survives_a_round_trip_on_every_event_type`.
+//   src/ledger.rs 442,455 `other => panic!("expected Malformed, …")`.
 //
 // One more thing a reader should not have to rediscover: the summary's "Missed Lines"
-// column is larger than this list (36 against 11). The difference is not a set of
+// column is larger than this list (54 against 19). The difference is not a set of
 // hidden gaps — no source line accounts for it. pinki is built twice under coverage,
 // once as the binary the tests here drive and once as the unit-test harness, and a
 // function present in both but exercised in only one is billed as missed lines against
 // the copy that never ran it. `--show-missing-lines` and the annotated `--text` report
-// both merge the two and agree on the eleven lines above.
+// both merge the two and agree on the nineteen lines above.
