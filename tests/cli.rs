@@ -5215,7 +5215,22 @@ fn supplied_amend_and_assess_sources_reach_show() {
     assert_eq!(detail["assessments"][0]["source"], "supplied");
     let text = scratch.run(&["show", &id]);
     text.expect(0);
-    assert!(text.stdout.contains("(supplied)"));
+    // Two arms print this marker, one on the amended horizon and one on the assessment.
+    // `contains` would stay green with either arm deleted, so pin both full lines.
+    assert_eq!(
+        text.stdout.matches("(supplied)").count(),
+        2,
+        "{}",
+        text.stdout
+    );
+    assert!(text.stdout.lines().any(|line| {
+        line.starts_with("    ") && line.contains(FUTURE) && line.ends_with("  (supplied)")
+    }));
+    assert!(text.stdout.lines().any(|line| {
+        line.contains("2020-01-02T00:00:00Z")
+            && line.contains("violated")
+            && line.ends_with("  (supplied)")
+    }));
 }
 
 #[test]
@@ -5231,6 +5246,12 @@ fn record_ref_handles_a_cycle_and_corrections_to_cancelled_and_refused() {
     }
     let args = ["a2a", "task", "--node", "box", "--seat", "aaif", "cycle-a"];
     let before = scratch.run(&args).json()[V1_KEY][0]["provenance"]["record_ref"].clone();
+    assert!(
+        before
+            .as_str()
+            .is_some_and(|r| r.starts_with("box:sha256:")),
+        "{before}"
+    );
     scratch
         .run(&[
             "resolve",
@@ -5428,7 +5449,35 @@ fn a2a_reports_non_utf8_node_and_failed_hostname() {
         .output()
         .expect("run with a failing hostname command");
     assert_eq!(failed_host.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&failed_host.stderr).contains("cannot read short hostname"));
+    // The `hostname -s` failure arm, not the spawn-failure arm: its wording ends in the command.
+    assert!(
+        String::from_utf8_lossy(&failed_host.stderr)
+            .contains("cannot read short hostname with `hostname -s`"),
+        "{}",
+        String::from_utf8_lossy(&failed_host.stderr)
+    );
+}
+
+#[test]
+fn a_missing_hostname_command_fails_with_the_spawn_error() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("address", "debtor", "creditor", FUTURE);
+    // An empty PATH, and a scratch directory with no `hostname` in it, so spawning fails.
+    let spawn_failed = Command::new(BIN)
+        .args(["a2a", "task", "--seat", "aaif", &id])
+        .current_dir(&scratch.dir)
+        .env("PINKI_LEDGER", scratch.ledger())
+        .env_remove("PINKI_NODE")
+        .env("PATH", "")
+        .output()
+        .expect("run with no hostname command");
+    assert_eq!(spawn_failed.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&spawn_failed.stderr);
+    assert!(
+        stderr.contains("cannot read short hostname: No such file or directory (os error 2)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("hostname -s"), "{stderr}");
 }
 
 // `cargo llvm-cov report --show-missing-lines` names nineteen source lines that
@@ -5474,7 +5523,7 @@ fn a2a_reports_non_utf8_node_and_failed_hostname() {
 //   src/ledger.rs 442,455 `other => panic!("expected Malformed, …")`.
 //
 // One more thing a reader should not have to rediscover: the summary's "Missed Lines"
-// column is larger than this list (54 against 19). The difference is not a set of
+// column is larger than this list (53 against 19). The difference is not a set of
 // hidden gaps — no source line accounts for it. pinki is built twice under coverage,
 // once as the binary the tests here drive and once as the unit-test harness, and a
 // function present in both but exercised in only one is billed as missed lines against

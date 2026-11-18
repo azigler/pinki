@@ -29,11 +29,18 @@ Exit status:
     3  could not evaluate (no coverage data, unparseable report, comment shape changed)
 """
 
-import argparse
-import pathlib
-import re
-import subprocess
 import sys
+
+# An import failure would otherwise exit 1 before main(), which the release dry run reads
+# as "the block is stale, would rewrite". Exit 3 (could not evaluate) instead.
+try:
+    import argparse
+    import pathlib
+    import re
+    import subprocess
+except ImportError as e:
+    print(f"COULD NOT EVALUATE: cannot import a standard module: {e}", file=sys.stderr)
+    sys.exit(3)
 
 # One entry per documented gap. `lines` are regexes on the STRIPPED source text of
 # consecutive lines; `prev` optionally constrains the line before the first. `count` is
@@ -42,7 +49,13 @@ KNOWN = [
     {
         "key": "state_walk_missing",
         "file": "src/state.rs",
-        "prev": r"\}",
+        # The `}` that closes `if let Some(view)` in the graph walk: the lines above it
+        # are the `stack.extend` of children and the `}` that closes its `if let`. A bare
+        # `}` after a `}` fits about 36 lines of src/state.rs; this fits one.
+        "prev": [
+            r"stack\.extend\(children\.iter\(\)\.rev\(\)\.map\(\|child\| \(\*child, depth \+ 1\)\)\);",
+            r"\}",
+        ],
         "lines": [r"\}"],
         "count": 1,
         "why": "Every graph walk id comes from a fold view.",
@@ -165,7 +178,12 @@ COMMENT_EDITS = [
         None,
         "pair",
     ),
-    (r"(src/verbs\.rs )\d+(  correction `--as`)", "verbs_correct_clap", 0, "single"),
+    (
+        r"(src/verbs\.rs )\d+(  correction `--as`)",
+        "verbs_correct_clap",
+        0,
+        "single",
+    ),
     (
         r"(src/verbs\.rs )\d+(?:,\d+){3}(  typed event fallbacks)",
         "verbs_typed_fallbacks",
@@ -250,17 +268,27 @@ def classify(repo: pathlib.Path, miss):
         hits = []
         for start in sorted(uncovered):
             span = range(start, start + len(entry["lines"]))
-            if any(n not in uncovered or (entry["file"], n) in claimed for n in span):
+            if any(
+                n not in uncovered or (entry["file"], n) in claimed
+                for n in span
+            ):
                 continue
             if any(
-                n > len(src)
-                or not re.match(pat, src[n - 1].strip())
+                n > len(src) or not re.match(pat, src[n - 1].strip())
                 for n, pat in zip(span, entry["lines"], strict=True)
             ):
                 continue
-            prev = entry.get("prev")
+            # `prev` is one regex for the line above, or a list of regexes for the lines
+            # above, outermost first (the last one is the line directly above).
+            prev = entry.get("prev") or []
+            if isinstance(prev, str):
+                prev = [prev]
             if prev and not (
-                start >= 2 and re.search(prev, src[start - 2].strip())
+                start > len(prev)
+                and all(
+                    re.search(pat, src[start - 1 - len(prev) + i].strip())
+                    for i, pat in enumerate(prev)
+                )
             ):
                 continue
             hits.append(tuple(span))
@@ -402,7 +430,10 @@ def main() -> int:
         print(f"COULD NOT EVALUATE: {e}", file=sys.stderr)
         return 3
     except Exception as e:
-        print(f"COULD NOT EVALUATE: unexpected {type(e).__name__}: {e}", file=sys.stderr)
+        print(
+            f"COULD NOT EVALUATE: unexpected {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
         return 3
 
 
