@@ -5247,9 +5247,10 @@ fn record_ref_handles_a_cycle_and_corrections_to_cancelled_and_refused() {
     let args = ["a2a", "task", "--node", "box", "--seat", "aaif", "cycle-a"];
     let before = scratch.run(&args).json()[V1_KEY][0]["provenance"]["record_ref"].clone();
     assert!(
-        before
-            .as_str()
-            .is_some_and(|r| r.starts_with("box:sha256:")),
+        before.as_str().is_some_and(|r| r
+            .strip_prefix("box:sha256:")
+            .is_some_and(|hex| hex.len() == 64
+                && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))),
         "{before}"
     );
     scratch
@@ -5458,6 +5459,7 @@ fn a2a_reports_non_utf8_node_and_failed_hostname() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_missing_hostname_command_fails_with_the_spawn_error() {
     let scratch = Scratch::new();

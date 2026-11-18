@@ -93,7 +93,14 @@ class UncoveredLinesTests(unittest.TestCase):
         every_line = {"src/state.rs": list(range(1, len(src) + 1))}
         with mock.patch.object(uncovered, "KNOWN", [entry]):
             found, _, _ = uncovered.classify(ROOT, every_line)
-        self.assertEqual(len(found["state_walk_missing"]), 1)
+        hits = found["state_walk_missing"]
+        self.assertEqual(len(hits), 1)
+        # Pin WHICH line, not only how many: a `}` whose two lines above are a `}` and the
+        # `stack.extend` of children. An off-by-one in the matcher fits another line.
+        (line,) = hits[0]
+        self.assertEqual(src[line - 1].strip(), "}")
+        self.assertEqual(src[line - 2].strip(), "}")
+        self.assertIn("stack.extend(children", src[line - 3])
 
 
 if __name__ == "__main__":

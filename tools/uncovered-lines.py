@@ -43,8 +43,10 @@ except ImportError as e:
     sys.exit(3)
 
 # One entry per documented gap. `lines` are regexes on the STRIPPED source text of
-# consecutive lines; `prev` optionally constrains the line before the first. `count` is
-# how many separate occurrences the set must contain, in file order.
+# consecutive lines; `prev` optionally constrains the lines before the first: one regex
+# for the line directly above, or a list of regexes for the lines above, in order (the
+# last one is the line directly above). `count` is how many separate occurrences the set
+# must contain, in file order.
 KNOWN = [
     {
         "key": "state_walk_missing",
