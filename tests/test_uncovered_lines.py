@@ -4,11 +4,11 @@ import contextlib
 import importlib.util
 import io
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
-
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location(
@@ -74,6 +74,33 @@ class UncoveredLinesTests(unittest.TestCase):
             error.getvalue().count("COULD NOT EVALUATE: unexpected UnicodeDecodeError:"),
             1,
         )
+
+    def test_import_failure_is_could_not_evaluate(self):
+        # A module that cannot be imported must exit 3, not the traceback's 1.
+        code = (
+            "import runpy, sys; sys.modules['argparse'] = None; "
+            f"runpy.run_path({str(ROOT / 'tools' / 'uncovered-lines.py')!r}, run_name='x')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", code], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("COULD NOT EVALUATE", result.stderr)
+
+    def test_state_walk_shape_matches_one_line_of_state_rs(self):
+        entry = next(e for e in uncovered.KNOWN if e["key"] == "state_walk_missing")
+        src = (ROOT / entry["file"]).read_text().splitlines()
+        every_line = {"src/state.rs": list(range(1, len(src) + 1))}
+        with mock.patch.object(uncovered, "KNOWN", [entry]):
+            found, _, _ = uncovered.classify(ROOT, every_line)
+        hits = found["state_walk_missing"]
+        self.assertEqual(len(hits), 1)
+        # Pin WHICH line, not only how many: a `}` whose two lines above are a `}` and the
+        # `stack.extend` of children. An off-by-one in the matcher fits another line.
+        (line,) = hits[0]
+        self.assertEqual(src[line - 1].strip(), "}")
+        self.assertEqual(src[line - 2].strip(), "}")
+        self.assertIn("stack.extend(children", src[line - 3])
 
 
 if __name__ == "__main__":
