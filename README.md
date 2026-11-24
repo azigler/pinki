@@ -116,7 +116,9 @@ without resolving the promise. An observer corrects or withdraws its own judgmen
 `--retracted`. Only the same observer may supersede, and the earlier line stays in the
 ledger. `show` marks each assessment as superseded or not, and as made before or after
 the resolution (`after_resolution` in `--json`). `pinki export` gives a versioned JSON view (`--now ISO` makes it reproducible);
-`--format jsonl` prints one promise per line.
+`--format jsonl` prints one promise per line. Export carries each promise's `meta` and each
+amendment's `meta` with the same keys and values you wrote. It re-serializes them, so key
+order and number formatting can change (`1.50` reads back as `1.5`). Compare values, not bytes.
 
 ## States and exit codes
 
