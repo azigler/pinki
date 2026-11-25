@@ -128,8 +128,6 @@ pub struct PromiseView<'a> {
     /// The `resolve` event that ended it, if any. The **first** one in the log —
     /// see [`fold`] on why later ones are ignored rather than rejected.
     pub resolution: Option<&'a Event>,
-    /// Timestamp of the latest authorized correction, or the winning resolution.
-    pub effective_resolution_at: Option<&'a str>,
     /// Every correction line for this promise, in log order. The original resolution
     /// remains separate, so readers can display the complete history.
     pub corrections: Vec<&'a Event>,
@@ -169,14 +167,15 @@ impl<'a> PromiseView<'a> {
     }
 
     /// Whether satisfaction was recorded by the current deadline, inclusive.
-    /// Invalid foreign timestamps cannot establish a fact; callers report the error.
-    pub fn on_time(&self) -> Result<Option<bool>, jiff::Error> {
+    /// Corrections relabel the outcome, never the winning resolution instant.
+    /// An unreadable instant leaves the fact unknown without failing the read.
+    pub fn on_time(&self) -> Option<bool> {
         if self.state != State::Satisfied {
-            return Ok(None);
+            return None;
         }
-        let at = Timestamp::from_str(self.effective_resolution_at.unwrap_or_default())?;
-        let until = Timestamp::from_str(self.until())?;
-        Ok(Some(at <= until))
+        let at = Timestamp::from_str(&self.resolution?.ts).ok()?;
+        let until = Timestamp::from_str(self.until()).ok()?;
+        Some(at <= until)
     }
 
     /// The **current** horizon: the latest `amend`'s `until`, or the declared one if
@@ -348,7 +347,6 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
     let mut amendments: HashMap<&'a str, Vec<Horizon<'a>>> = HashMap::new();
     let mut resolutions: HashMap<&'a str, &'a Event> = HashMap::new();
     let mut corrections: HashMap<&'a str, Vec<&'a Event>> = HashMap::new();
-    let mut corrected_at: HashMap<&'a str, &'a str> = HashMap::new();
     let mut effective: HashMap<&'a str, CorrectAs> = HashMap::new();
     let mut assessments: HashMap<&'a str, Vec<Assessed<'a>>> = HashMap::new();
 
@@ -407,7 +405,6 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                     .is_some_and(|winner| winner.by() == by)
                 {
                     effective.insert(promise.as_str(), *outcome);
-                    corrected_at.insert(promise.as_str(), event.ts.as_str());
                 }
             }
             EventBody::Assess {
@@ -502,10 +499,6 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                 },
                 horizons,
                 resolution: resolutions.get(id).copied(),
-                effective_resolution_at: corrected_at
-                    .get(id)
-                    .copied()
-                    .or_else(|| resolutions.get(id).map(|event| event.ts.as_str())),
                 corrections: corrections.get(id).cloned().unwrap_or_default(),
                 assessments: assessments.get(id).cloned().unwrap_or_default(),
             };

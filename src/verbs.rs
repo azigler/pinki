@@ -948,7 +948,7 @@ fn tree_json<'a>(visits: &[GraphVisit<'_, 'a>], folded: &Fold<'a>) -> Vec<TreeRo
     roots
 }
 
-fn print_graph_rows(visits: &[GraphVisit<'_, '_>], folded: &Fold<'_>) -> Result<(), Fail> {
+fn print_graph_rows(visits: &[GraphVisit<'_, '_>], folded: &Fold<'_>) {
     for visit in visits {
         let view = visit.view;
         let indent = "  ".repeat(visit.depth);
@@ -962,14 +962,13 @@ fn print_graph_rows(visits: &[GraphVisit<'_, '_>], folded: &Fold<'_>) -> Result<
         println!(
             "{indent}{}  {}  {}  {} -> {}  {}{missing}",
             view.id(),
-            state_label(view)?,
+            state_label(view),
             view.until(),
             view.record.by,
             view.record.to,
             ellipsize(&view.record.promise, 56),
         );
     }
-    Ok(())
 }
 
 fn ls(args: LsArgs) -> Result<(), Fail> {
@@ -1002,7 +1001,7 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
         } else if visits.is_empty() {
             print_empty_ls(&folded);
         } else {
-            print_graph_rows(&visits, &folded)?;
+            print_graph_rows(&visits, &folded);
         }
         return Ok(());
     }
@@ -1026,10 +1025,7 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
     }
 
     let id_width = width(rows.iter().map(|view| view.id()));
-    let labels: Vec<String> = rows
-        .iter()
-        .map(|view| state_label(view))
-        .collect::<Result<_, _>>()?;
+    let labels: Vec<String> = rows.iter().map(|view| state_label(view)).collect();
     let state_width = width(labels.iter().map(String::as_str));
     let until_width = width(rows.iter().map(|view| view.until()));
     let parties: Vec<String> = rows
@@ -1111,17 +1107,12 @@ pub(crate) fn moved_after_dependents(
         })
 }
 
-pub(crate) fn on_time(view: &PromiseView<'_>) -> Result<Option<bool>, Fail> {
-    view.on_time()
-        .map_err(|e| Fail::Op(format!("cannot compute on_time for `{}`: {e}", view.id())))
-}
-
-fn state_label(view: &PromiseView<'_>) -> Result<String, Fail> {
-    Ok(match on_time(view)? {
+fn state_label(view: &PromiseView<'_>) -> String {
+    match view.on_time() {
         Some(true) => "satisfied (on time)".to_string(),
         Some(false) => "satisfied (late)".to_string(),
         None => view.state.to_string(),
-    })
+    }
 }
 
 /// `show --json`: the record, the computed state, every horizon, how it ended, and
@@ -1388,7 +1379,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                 .collect();
             println!("{}", encode(&rows)?);
         } else {
-            print_graph_rows(waiters, &folded)?;
+            print_graph_rows(waiters, &folded);
         }
         return Ok(());
     }
@@ -1416,7 +1407,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             "{}",
             encode(&ShowDetail {
                 detail,
-                on_time: on_time(view)?,
+                on_time: view.on_time(),
                 dependents,
             })?
         );
@@ -1431,7 +1422,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         ..
     } = detail;
 
-    println!("{}  {}", view.id(), state_label(view)?);
+    println!("{}  {}", view.id(), state_label(view));
     println!("  promise      {}", view.record.promise);
     println!("  by           {}", view.record.by);
     println!("  to           {}", view.record.to);

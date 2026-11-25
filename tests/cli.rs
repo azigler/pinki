@@ -4900,7 +4900,7 @@ fn export_carries_supersede_and_post_resolution_assessments_in_both_formats() {
 }
 
 #[test]
-fn export_of_an_old_ledger_adds_satisfaction_counts() {
+fn export_of_an_old_ledger_keeps_its_exact_v1_bytes() {
     let scratch = Scratch::new();
     scratch.touch();
     fs::write(
@@ -4918,7 +4918,7 @@ fn export_of_an_old_ledger_adds_satisfaction_counts() {
     assert_eq!(
         json.stdout,
         concat!(
-            "{\"format\":\"pinki-export\",\"version\":1,\"summary\":{\"total\":1,\"states\":{\"cancelled\":0,\"conditional\":0,\"detached\":1,\"expired\":0,\"overdue\":0,\"released\":0,\"satisfied\":0},\"satisfied_on_time\":0,\"satisfied_late\":0},",
+            "{\"format\":\"pinki-export\",\"version\":1,\"summary\":{\"total\":1,\"states\":{\"cancelled\":0,\"conditional\":0,\"detached\":1,\"expired\":0,\"overdue\":0,\"released\":0,\"satisfied\":0}},",
             "\"promises\":[{\"id\":\"old\",\"promise\":\"ship\",\"by\":\"a\",\"to\":\"b\",\"until\":\"2099-01-01T00:00:00Z\",\"original_until\":\"2099-01-01T00:00:00Z\",\"amendments\":[],\"state\":\"detached\",\"resolution\":null,\"assessments\":[{\"state\":\"violated\",\"observer\":\"watchdog\",\"at\":\"2026-01-02T00:00:00Z\"}],\"created_at\":\"2026-01-01T00:00:00Z\"}]}\n",
         )
     );
@@ -5535,7 +5535,7 @@ fn a_missing_hostname_command_fails_with_the_spawn_error() {
 // both merge the two and agree on the nineteen lines above.
 
 #[test]
-fn on_time_uses_current_horizon_and_effective_resolution() {
+fn on_time_uses_current_horizon_and_winning_resolution() {
     let scratch = Scratch::new();
     let until = "2020-01-02T00:00:00Z";
     let later = "2020-01-03T00:00:00Z";
@@ -5544,7 +5544,7 @@ fn on_time_uses_current_horizon_and_effective_resolution() {
         ("early", PAST, false, false, true),
         ("late", later, false, false, false),
         ("replanned", later, true, false, true),
-        ("corrected", later, false, true, false),
+        ("corrected", later, false, true, true),
         ("corrected-early", PAST, false, true, true),
     ] {
         scratch
@@ -5639,8 +5639,8 @@ fn on_time_uses_current_horizon_and_effective_resolution() {
     exported.expect(0);
     let document = exported.json();
     assert_eq!(document["summary"]["states"]["satisfied"], 6);
-    assert_eq!(document["summary"]["satisfied_on_time"], 4);
-    assert_eq!(document["summary"]["satisfied_late"], 2);
+    assert_eq!(document["summary"]["satisfied_on_time"], 5);
+    assert_eq!(document["summary"]["satisfied_late"], 1);
     let jsonl = scratch.run(&["export", "--format", "jsonl"]);
     jsonl.expect(0);
     let lines: Vec<serde_json::Value> = jsonl
@@ -5659,8 +5659,10 @@ fn on_time_uses_current_horizon_and_effective_resolution() {
     }
     let filtered = scratch.run(&["export", "--state", "detached"]);
     filtered.expect(0);
-    assert_eq!(filtered.json()["summary"]["satisfied_on_time"], 0);
-    assert_eq!(filtered.json()["summary"]["satisfied_late"], 0);
+    assert_eq!(document["summary"]["satisfied_unknown"], 0);
+    for key in ["satisfied_on_time", "satisfied_late", "satisfied_unknown"] {
+        assert!(filtered.json()["summary"].get(key).is_none());
+    }
 }
 
 #[test]
@@ -5724,7 +5726,7 @@ fn on_time_is_absent_for_every_non_satisfied_state() {
 }
 
 #[test]
-fn on_time_rejects_unreadable_satisfaction_instants() {
+fn on_time_omits_unreadable_satisfaction_instants() {
     for field in ["ts", "until"] {
         let scratch = Scratch::new();
         let id = scratch.promise("ship", "a", "b", FUTURE);
@@ -5741,13 +5743,17 @@ fn on_time_rejects_unreadable_satisfaction_instants() {
             vec!["export"],
         ] {
             let run = scratch.run(&args);
-            run.expect(1);
-            assert!(
-                run.stderr.contains("cannot compute on_time"),
-                "{}",
-                run.stderr
-            );
+            run.expect(0);
+            assert!(run.stdout.contains(&id));
+            assert!(!run.stdout.contains("satisfied ("));
         }
+        let shown = scratch.run(&["show", &id, "--json"]).json();
+        assert_eq!(shown["state"], "satisfied");
+        assert!(shown.get("on_time").is_none());
+        let exported = scratch.run(&["export"]).json();
+        assert_eq!(exported["promises"][0]["id"], id);
+        assert!(exported["promises"][0].get("on_time").is_none());
+        assert_eq!(exported["summary"]["satisfied_unknown"], 1);
     }
 }
 
@@ -5977,4 +5983,189 @@ fn dependents_reject_unreadable_times_needed_for_move_facts() {
             );
         }
     }
+}
+
+#[test]
+fn on_time_unreadable_ls_all_exits_zero_and_keeps_every_row() {
+    for field in ["ts", "until"] {
+        let scratch = Scratch::new();
+        for id in ["unknown", "early", "late", "open"] {
+            scratch
+                .run(&[
+                    "promise",
+                    "ship",
+                    "--id",
+                    id,
+                    "--by",
+                    "a",
+                    "--to",
+                    "b",
+                    "--until",
+                    "2020-01-02T00:00:00Z",
+                    "--ts",
+                    PAST,
+                ])
+                .expect(0);
+            if id != "open" {
+                let at = if id == "late" {
+                    "2020-01-03T00:00:00Z"
+                } else {
+                    PAST
+                };
+                scratch
+                    .run(&[
+                        "resolve",
+                        id,
+                        "--satisfied",
+                        "--evidence",
+                        "done",
+                        "--ts",
+                        at,
+                    ])
+                    .expect(0);
+            }
+        }
+        scratch.rewrite(|_, event| {
+            if event.get("id").and_then(|id| id.as_str()) == Some("unknown") {
+                event.insert("on".into(), serde_json::json!("open"));
+            }
+            if (field == "ts" && event["type"] == "resolve" && event["promise"] == "unknown")
+                || (field == "until"
+                    && event.get("id").and_then(|id| id.as_str()) == Some("unknown"))
+            {
+                event.insert(field.into(), serde_json::json!("not-an-instant"));
+            }
+        });
+        let before = scratch.lines();
+        for args in [
+            vec!["ls", "--all"],
+            vec!["ls", "--all", "--tree"],
+            vec!["ls", "--all", "--json"],
+            vec!["ls", "--all", "--tree", "--json"],
+            vec!["export"],
+            vec!["export", "--format", "jsonl"],
+        ] {
+            let run = scratch.run(&args);
+            run.expect(0);
+            for id in ["unknown", "early", "late", "open"] {
+                assert!(run.stdout.contains(id), "{args:?}: {}", run.stdout);
+            }
+        }
+        for args in [
+            vec!["ls", "--state", "satisfied"],
+            vec!["ls", "--state", "satisfied", "--tree"],
+            vec!["ls", "--state", "satisfied", "--json"],
+            vec!["ls", "--state", "satisfied", "--tree", "--json"],
+            vec!["show", "open", "--waiters"],
+            vec!["show", "open", "--waiters", "--json"],
+        ] {
+            let run = scratch.run(&args);
+            run.expect(0);
+            assert!(run.stdout.contains("unknown"));
+        }
+        scratch.run(&["ls"]).expect(0);
+        scratch.run(&["ls", "--tree"]).expect(0);
+        let exported = scratch.run(&["export"]).json();
+        let summary = &exported["summary"];
+        assert_eq!(summary["satisfied_on_time"], 1);
+        assert_eq!(summary["satisfied_late"], 1);
+        assert_eq!(summary["satisfied_unknown"], 1);
+        assert_eq!(summary["states"]["satisfied"], 3);
+        let rows = exported["promises"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        let unknown = rows.iter().find(|row| row["id"] == "unknown").unwrap();
+        assert!(unknown.get("on_time").is_none());
+        assert_eq!(unknown["state"], "satisfied");
+        assert_eq!(scratch.lines(), before);
+    }
+}
+
+#[test]
+fn on_time_corrected_back_months_later_keeps_winning_resolve_instant() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&[
+            "promise",
+            "ship",
+            "--id",
+            "P",
+            "--by",
+            "a",
+            "--to",
+            "b",
+            "--until",
+            "2020-01-10T00:00:00Z",
+            "--ts",
+            PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "resolve",
+            "P",
+            "--satisfied",
+            "--evidence",
+            "done",
+            "--ts",
+            "2020-01-05T00:00:00Z",
+        ])
+        .expect(0);
+    assert_eq!(
+        scratch.run(&["show", "P", "--json"]).json()["on_time"],
+        true
+    );
+    scratch
+        .run(&[
+            "correct",
+            "P",
+            "--as",
+            "cancelled",
+            "--by",
+            "a",
+            "--reason",
+            "mislabelled",
+            "--ts",
+            "2020-02-01T00:00:00Z",
+        ])
+        .expect(0);
+    assert!(scratch
+        .run(&["show", "P", "--json"])
+        .json()
+        .get("on_time")
+        .is_none());
+    scratch
+        .run(&[
+            "correct",
+            "P",
+            "--as",
+            "satisfied",
+            "--by",
+            "a",
+            "--reason",
+            "original was right",
+            "--evidence",
+            "done",
+            "--ts",
+            "2020-04-01T00:00:00Z",
+        ])
+        .expect(0);
+    assert_eq!(
+        scratch.run(&["show", "P", "--json"]).json()["on_time"],
+        true
+    );
+    let export = scratch.run(&["export"]).json();
+    assert_eq!(export["promises"][0]["on_time"], true);
+    assert_eq!(
+        export["promises"][0]["resolution"]["at"],
+        "2020-01-05T00:00:00Z"
+    );
+    scratch.rewrite(|_, event| {
+        if event["type"] == "correct" {
+            event.insert("ts".into(), serde_json::json!("not-an-instant"));
+        }
+    });
+    assert_eq!(
+        scratch.run(&["show", "P", "--json"]).json()["on_time"],
+        true
+    );
 }

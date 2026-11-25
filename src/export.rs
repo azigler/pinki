@@ -15,9 +15,7 @@ use crate::cli::{ExportArgs, ExportFormat};
 use crate::event::{EventBody, Resolution};
 use crate::record::{Meta, Promise};
 use crate::state::{fold, Fold, PromiseView, State};
-use crate::verbs::{
-    dependents, moved_after_dependents, on_time, read_existing_ledger, Dependent, Fail,
-};
+use crate::verbs::{dependents, moved_after_dependents, read_existing_ledger, Dependent, Fail};
 
 #[derive(Serialize)]
 struct Document<'a> {
@@ -31,8 +29,12 @@ struct Document<'a> {
 struct Summary {
     total: usize,
     states: BTreeMap<&'static str, usize>,
-    satisfied_on_time: usize,
-    satisfied_late: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    satisfied_on_time: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    satisfied_late: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    satisfied_unknown: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -191,13 +193,22 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
                     .get_mut(promise.state)
                     .expect("every folded state is named") += 1;
             }
+            let has_satisfied = states["satisfied"] > 0;
             let document = Document {
                 format: "pinki-export",
                 version: 1,
                 summary: Summary {
                     total: promises.len(),
-                    satisfied_on_time: promises.iter().filter(|p| p.on_time == Some(true)).count(),
-                    satisfied_late: promises.iter().filter(|p| p.on_time == Some(false)).count(),
+                    satisfied_on_time: has_satisfied
+                        .then(|| promises.iter().filter(|p| p.on_time == Some(true)).count()),
+                    satisfied_late: has_satisfied
+                        .then(|| promises.iter().filter(|p| p.on_time == Some(false)).count()),
+                    satisfied_unknown: has_satisfied.then(|| {
+                        promises
+                            .iter()
+                            .filter(|p| p.state == "satisfied" && p.on_time.is_none())
+                            .count()
+                    }),
                     states,
                 },
                 promises,
@@ -317,7 +328,7 @@ fn project<'a>(view: &'a PromiseView<'a>, folded: &Fold<'a>) -> Result<ExportPro
         original_until: view.record.until.as_str(),
         amendments,
         state: view.state.as_str(),
-        on_time: on_time(view)?,
+        on_time: view.on_time(),
         dependents: dependents(folded, view.id()),
         resolution,
         corrections,

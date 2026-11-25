@@ -55,13 +55,15 @@ pinki ls --json
 `show` gives one promise, its current deadline, resolution, corrections, and assessments.
 Satisfied promises show `satisfied (on time)` or `satisfied (late)` in human `show`
 and `ls`. `show --json` and both export formats include `on_time`: true when the
-effective resolution timestamp is at or before the **current** `until`, after
-amends. An authorized correction uses its own timestamp. Other states omit
-`on_time`, following the optional-field convention. Unreadable timestamps in a
-foreign ledger produce an error rather than a lateness claim. Export keeps
-`original_until` and the existing `summary.states.satisfied` total; the new
-`summary.satisfied_on_time` and `summary.satisfied_late` counts sum to that total
-for the selected promises.
+winning resolve timestamp is at or before the **current** `until`, after
+amends. A correction relabels the outcome but keeps that original resolve instant.
+Other states omit `on_time`, following the optional-field convention. If a needed
+instant is unreadable, the fact is omitted and human output prints plain `satisfied`;
+reads still succeed. Export keeps `original_until` and `summary.states.satisfied`.
+When that total is positive, `summary.satisfied_on_time`, `summary.satisfied_late`,
+and `summary.satisfied_unknown` sum to it; all three keys are absent otherwise.
+A debtor who resolves early with another outcome and corrects to satisfied after
+late delivery reads as on time; the correction's reason carries that story.
 
 ```sh
 pinki show "$id" --json

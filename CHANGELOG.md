@@ -19,10 +19,11 @@ tools can depend on them, not merely read them.
   marks those moves in its horizon history (#36). No notifications are sent.
 
 - Satisfied promises carry `on_time` in `show --json` and both export formats.
-  The fact compares the effective resolution timestamp (including authorized
-  corrections) with the current amended deadline. Human `show` and `ls` mark
-  satisfaction as on time or late. Export summary splits the satisfied total
-  into `satisfied_on_time` and `satisfied_late` (#34).
+  The fact compares the winning resolve timestamp with the current amended
+  deadline; corrections relabel only the outcome. Human `show` and `ls` mark
+  satisfaction as on time or late, or leave it plain if an instant is unreadable.
+  When satisfied promises exist, export summary splits their total into
+  `satisfied_on_time`, `satisfied_late`, and `satisfied_unknown` (#34).
 
 - A2A v1 records carry `provenance.record_ref` beside `ledger_ref`:
   `HOST:sha256:<digest>` over only that promise's own ledger lines (its
