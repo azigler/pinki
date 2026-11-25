@@ -94,6 +94,8 @@ impl std::fmt::Display for State {
 /// deadline moved twice, says who, when" is one read of the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Horizon<'a> {
+    /// Position in the ledger, used only to break equal-instant ties.
+    log_index: usize,
     /// The `ts` of the event that spoke this horizon.
     pub ts: &'a str,
     /// How this event's timestamp was obtained, if the ledger line says.
@@ -261,19 +263,21 @@ impl<'a> Fold<'a> {
             .into_iter()
             .flatten()
             .filter_map(|child| self.get(child))
+            .filter(|view| view.record.on.as_deref() != Some(view.id()))
     }
 
-    /// A horizon move made at or after a direct dependent's declaration timestamp.
-    /// This compares instants without changing the log order used to select events.
-    pub fn moved_after_dependents(&self, id: &str, ts: &str) -> Result<bool, jiff::Error> {
+    /// A move after a direct dependent's declaration instant, with log-order ties.
+    /// Every needed instant must parse; otherwise the fact remains unknown.
+    pub fn moved_after_dependents(&self, id: &str, horizon: &Horizon<'_>) -> Option<bool> {
+        let amended = Timestamp::from_str(horizon.ts).ok()?;
+        let mut moved = false;
         for dependent in self.dependents(id) {
-            let declared = Timestamp::from_str(dependent.horizons[0].ts)?;
-            let amended = Timestamp::from_str(ts)?;
-            if declared <= amended {
-                return Ok(true);
-            }
+            let declaration = &dependent.horizons[0];
+            let declared = Timestamp::from_str(declaration.ts).ok()?;
+            moved |= declared < amended
+                || (declared == amended && declaration.log_index < horizon.log_index);
         }
-        Ok(false)
+        Some(moved)
     }
 
     /// Walk the reverse `on` edges in declaration order, using the fold's views and
@@ -343,21 +347,21 @@ impl<'a> Fold<'a> {
 pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
     let mut order: Vec<&'a str> = Vec::new();
     let mut records: HashMap<&'a str, &'a Promise> = HashMap::new();
-    let mut declared_at: HashMap<&'a str, &'a Event> = HashMap::new();
+    let mut declared_at: HashMap<&'a str, (&'a Event, usize)> = HashMap::new();
     let mut amendments: HashMap<&'a str, Vec<Horizon<'a>>> = HashMap::new();
     let mut resolutions: HashMap<&'a str, &'a Event> = HashMap::new();
     let mut corrections: HashMap<&'a str, Vec<&'a Event>> = HashMap::new();
     let mut effective: HashMap<&'a str, CorrectAs> = HashMap::new();
     let mut assessments: HashMap<&'a str, Vec<Assessed<'a>>> = HashMap::new();
 
-    for event in events {
+    for (log_index, event) in events.iter().enumerate() {
         match &event.body {
             EventBody::Promise(record) => {
                 // First declaration wins: `insert` would overwrite, which would let a
                 // re-declaration silently move a deadline.
                 if let Entry::Vacant(slot) = records.entry(record.id.as_str()) {
                     slot.insert(record);
-                    declared_at.insert(record.id.as_str(), event);
+                    declared_at.insert(record.id.as_str(), (event, log_index));
                     order.push(record.id.as_str());
                 }
             }
@@ -376,6 +380,7 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                     .entry(promise.as_str())
                     .or_default()
                     .push(Horizon {
+                        log_index,
                         ts: event.ts.as_str(),
                         source: event.source.as_deref(),
                         until: until.as_str(),
@@ -472,13 +477,17 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
             // Declaration first, then every amend in log order. The declaration's `by`
             // is the debtor's: speaking a promise sets its first horizon.
             let mut horizons = vec![Horizon {
+                log_index: declared_at
+                    .get(id)
+                    .map(|(_, index)| *index)
+                    .unwrap_or_default(),
                 ts: declared_at
                     .get(id)
-                    .map(|event| event.ts.as_str())
+                    .map(|(event, _)| event.ts.as_str())
                     .unwrap_or_default(),
                 source: declared_at
                     .get(id)
-                    .and_then(|event| event.source.as_deref()),
+                    .and_then(|(event, _)| event.source.as_deref()),
                 until: record.until.as_str(),
                 by: record.by.as_str(),
                 reason: None,

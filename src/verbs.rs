@@ -43,7 +43,7 @@ use crate::export;
 use crate::id;
 use crate::ledger;
 use crate::record::{Meta, Promise};
-use crate::state::{fold, Fold, GraphVisit, PromiseView, State};
+use crate::state::{fold, Fold, GraphVisit, Horizon, PromiseView, State};
 
 /// A command that did not succeed.
 ///
@@ -1095,16 +1095,11 @@ pub(crate) fn dependents<'a>(folded: &Fold<'a>, id: &str) -> Vec<Dependent<'a>> 
 pub(crate) fn moved_after_dependents(
     folded: &Fold<'_>,
     id: &str,
-    ts: &str,
-) -> Result<Option<bool>, Fail> {
+    horizon: &Horizon<'_>,
+) -> Option<bool> {
     folded
-        .moved_after_dependents(id, ts)
-        .map(|moved| moved.then_some(true))
-        .map_err(|e| {
-            Fail::Op(format!(
-                "cannot compute moved_after_dependents for `{id}`: {e}"
-            ))
-        })
+        .moved_after_dependents(id, horizon)
+        .filter(|moved| *moved)
 }
 
 fn state_label(view: &PromiseView<'_>) -> String {
@@ -1385,8 +1380,8 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     }
 
     let mut detail = detail(view);
-    for horizon in detail.horizons.iter_mut().skip(1) {
-        horizon.moved_after_dependents = moved_after_dependents(&folded, view.id(), horizon.ts)?;
+    for (output, horizon) in detail.horizons.iter_mut().zip(&view.horizons).skip(1) {
+        output.moved_after_dependents = moved_after_dependents(&folded, view.id(), horizon);
     }
     let dependents = dependents(&folded, view.id());
     // The superseding line's own state, for the text block: "superseded by <ts>
@@ -1673,8 +1668,8 @@ fn a2a_task(
         .iter()
         .map(|id| folded.get(id).ok_or_else(|| unknown_id(id, "a2a task")))
         .collect::<Result<_, _>>()?;
-    // `detail` is the same read model as `show --json`. Resolve every id
-    // before printing, so a missing id yields no partial metadata.
+    // `detail` is the shared base read model, without show/export-only facts.
+    // Resolve every id before printing, so a missing id yields no partial metadata.
     let details: Vec<_> = views.iter().map(|view| detail(view)).collect();
     let encoded = match address {
         Some((node, seat)) => {

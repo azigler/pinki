@@ -168,7 +168,7 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
     let promises: Vec<ExportPromise<'_>> = selected
         .into_iter()
         .map(|view| project(view, &folded))
-        .collect::<Result<_, _>>()?;
+        .collect();
 
     match args.format {
         ExportFormat::Json => {
@@ -237,21 +237,19 @@ fn time_key(ts: &str) -> (Option<Timestamp>, &str) {
     (Timestamp::from_str(ts).ok(), ts)
 }
 
-fn project<'a>(view: &'a PromiseView<'a>, folded: &Fold<'a>) -> Result<ExportPromise<'a>, Fail> {
+fn project<'a>(view: &'a PromiseView<'a>, folded: &Fold<'a>) -> ExportPromise<'a> {
     let mut amendments: Vec<Amendment<'_>> = view
         .amendments()
         .iter()
-        .map(|horizon| {
-            Ok(Amendment {
-                moved_after_dependents: moved_after_dependents(folded, view.id(), horizon.ts)?,
-                until: horizon.until,
-                by: horizon.by,
-                reason: horizon.reason,
-                at: horizon.ts,
-                meta: horizon.meta,
-            })
+        .map(|horizon| Amendment {
+            moved_after_dependents: moved_after_dependents(folded, view.id(), horizon),
+            until: horizon.until,
+            by: horizon.by,
+            reason: horizon.reason,
+            at: horizon.ts,
+            meta: horizon.meta,
         })
-        .collect::<Result<_, Fail>>()?;
+        .collect();
     amendments.sort_by_key(|amendment| time_key(amendment.at));
 
     let resolution = view.resolution.and_then(|event| {
@@ -323,7 +321,7 @@ fn project<'a>(view: &'a PromiseView<'a>, folded: &Fold<'a>) -> Result<ExportPro
         })
         .collect();
 
-    Ok(ExportPromise {
+    ExportPromise {
         record: view.current_record(),
         original_until: view.record.until.as_str(),
         amendments,
@@ -334,7 +332,7 @@ fn project<'a>(view: &'a PromiseView<'a>, folded: &Fold<'a>) -> Result<ExportPro
         corrections,
         assessments,
         created_at: view.horizons[0].ts,
-    })
+    }
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<String, Fail> {

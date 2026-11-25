@@ -71,19 +71,20 @@ pinki show "$id" --json
 
 `show` and both export formats also list direct `dependents`: promises whose
 `on` names this id, with each dependent's `id`, `by`, and computed `state`.
-Resolved dependents stay listed. The field is omitted when the list is empty.
+Resolved dependents stay listed; a promise never lists itself. The field is
+omitted when the list is empty.
 Export filters select the outer promises; each selected promise still lists all
 of its direct dependents. Indirect dependents belong to the existing `--waiters`
 view below.
 
-An amendment made at or after any direct dependent's declaration timestamp
+An amendment made after any direct dependent's declaration timestamp
 carries `moved_after_dependents: true` in `show --json` horizons and export
 amendments. Human `show` adds `(moved after dependents)` to that history entry.
 Otherwise the field is absent, including on the original declaration. Comparison
-uses timestamp instants, including equal timestamps and different UTC offsets;
-log order still selects the current deadline. An unreadable timestamp needed for
-this comparison produces an error. These facts make no judgment and send no
-notification.
+uses timestamp instants across UTC offsets. Equal instants use log order: only a
+dependent logged before the amend marks it. Log order still selects the current
+deadline. If any needed timestamp is unreadable, that amend's fact is omitted
+and reads still succeed. These facts make no judgment and send no notification.
 
 The `on` edge links a promise to the one it waits for. `ls --tree` shows the
 forest, with each promise's computed state. `show ID --waiters` lists every
