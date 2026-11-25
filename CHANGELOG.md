@@ -11,6 +11,14 @@ tools can depend on them, not merely read them.
 
 ## [Unreleased]
 
+### Documentation
+
+- Explain the two-party reading of refusal: the debtor's refusal stays terminal,
+  and the creditor can publish its own assessment. Record why a non-terminal
+  `decline` verb was not adopted (#33).
+- Document recurring work as separate promises linked with `--on`, with a runnable
+  README example. Recurring or renewing promises remain out of scope.
+
 ### Added
 
 - `show` and both export formats list direct `dependents`, including resolved

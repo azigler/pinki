@@ -149,6 +149,27 @@ amendment and resolution. pinki parses and re-serializes it, so keys come back s
 number can change its form or precision (`1.50` reads back as `1.5`; a float with more digits
 than a double holds is rounded). Keep a value that must stay exact as a string.
 
+## Repeat work in separate rounds
+
+Declare each round as a new promise with `--on` set to the previous round's id.
+Resolve each round on its own. The next round becomes owed when the previous round
+is satisfied. pinki does not schedule or renew promises. Here `$id` is the review
+already satisfied above; this declares and resolves its next round.
+
+```sh
+round_receipt=$(pinki promise "Review the next schema revision" \
+  --by https://example.org/agents/reviewer \
+  --to https://example.org/agents/author \
+  --until 2030-02-01T00:00:00Z --on "$id")
+round_id=${round_receipt%%$'\t'*}
+pinki resolve "$round_id" --satisfied --evidence https://example.org/reviews/schema-92
+pinki show "$id"
+pinki ls --tree --all
+```
+
+`show` lists direct dependents (new in Unreleased). `ls --tree --all` shows the
+chain, including resolved rounds.
+
 ## States and exit codes
 
 | Computed state | Meaning |
