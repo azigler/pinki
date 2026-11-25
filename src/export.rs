@@ -15,7 +15,7 @@ use crate::cli::{ExportArgs, ExportFormat};
 use crate::event::{EventBody, Resolution};
 use crate::record::{Meta, Promise};
 use crate::state::{fold, PromiseView, State};
-use crate::verbs::{read_existing_ledger, Fail};
+use crate::verbs::{on_time, read_existing_ledger, Fail};
 
 #[derive(Serialize)]
 struct Document<'a> {
@@ -29,6 +29,8 @@ struct Document<'a> {
 struct Summary {
     total: usize,
     states: BTreeMap<&'static str, usize>,
+    satisfied_on_time: usize,
+    satisfied_late: usize,
 }
 
 #[derive(Serialize)]
@@ -38,6 +40,8 @@ struct ExportPromise<'a> {
     original_until: &'a str,
     amendments: Vec<Amendment<'a>>,
     state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_time: Option<bool>,
     resolution: Option<ResolutionView<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     corrections: Vec<Correction<'a>>,
@@ -153,7 +157,10 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
     // Timestamps in a hand-written ledger may carry different offsets. Compare
     // instants when possible, then the raw text and id for a stable total order.
     selected.sort_by_key(|view| (time_key(view.horizons[0].ts), view.id()));
-    let promises: Vec<ExportPromise<'_>> = selected.into_iter().map(project).collect();
+    let promises: Vec<ExportPromise<'_>> = selected
+        .into_iter()
+        .map(project)
+        .collect::<Result<_, _>>()?;
 
     match args.format {
         ExportFormat::Json => {
@@ -183,6 +190,8 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
                 version: 1,
                 summary: Summary {
                     total: promises.len(),
+                    satisfied_on_time: promises.iter().filter(|p| p.on_time == Some(true)).count(),
+                    satisfied_late: promises.iter().filter(|p| p.on_time == Some(false)).count(),
                     states,
                 },
                 promises,
@@ -211,7 +220,7 @@ fn time_key(ts: &str) -> (Option<Timestamp>, &str) {
     (Timestamp::from_str(ts).ok(), ts)
 }
 
-fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
+fn project<'a>(view: &'a PromiseView<'a>) -> Result<ExportPromise<'a>, Fail> {
     let mut amendments: Vec<Amendment<'_>> = view
         .amendments()
         .iter()
@@ -294,16 +303,17 @@ fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
         })
         .collect();
 
-    ExportPromise {
+    Ok(ExportPromise {
         record: view.current_record(),
         original_until: view.record.until.as_str(),
         amendments,
         state: view.state.as_str(),
+        on_time: on_time(view)?,
         resolution,
         corrections,
         assessments,
         created_at: view.horizons[0].ts,
-    }
+    })
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<String, Fail> {

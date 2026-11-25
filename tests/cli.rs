@@ -3996,10 +3996,12 @@ fn a2a_task_distinguishes_satisfied_from_open_and_carries_assessment_history() {
         .as_object_mut()
         .unwrap()
         .remove("provenance");
+    let mut shown = scratch.run(&["show", "delivered", "--json"]).json();
     assert_eq!(
-        without_provenance,
-        scratch.run(&["show", "delivered", "--json"]).json()
+        shown.as_object_mut().unwrap().remove("on_time"),
+        Some(serde_json::json!(true))
     );
+    assert_eq!(without_provenance, shown);
 }
 
 #[test]
@@ -4898,7 +4900,7 @@ fn export_carries_supersede_and_post_resolution_assessments_in_both_formats() {
 }
 
 #[test]
-fn export_of_an_old_ledger_keeps_its_exact_v1_bytes() {
+fn export_of_an_old_ledger_adds_satisfaction_counts() {
     let scratch = Scratch::new();
     scratch.touch();
     fs::write(
@@ -4916,7 +4918,7 @@ fn export_of_an_old_ledger_keeps_its_exact_v1_bytes() {
     assert_eq!(
         json.stdout,
         concat!(
-            "{\"format\":\"pinki-export\",\"version\":1,\"summary\":{\"total\":1,\"states\":{\"cancelled\":0,\"conditional\":0,\"detached\":1,\"expired\":0,\"overdue\":0,\"released\":0,\"satisfied\":0}},",
+            "{\"format\":\"pinki-export\",\"version\":1,\"summary\":{\"total\":1,\"states\":{\"cancelled\":0,\"conditional\":0,\"detached\":1,\"expired\":0,\"overdue\":0,\"released\":0,\"satisfied\":0},\"satisfied_on_time\":0,\"satisfied_late\":0},",
             "\"promises\":[{\"id\":\"old\",\"promise\":\"ship\",\"by\":\"a\",\"to\":\"b\",\"until\":\"2099-01-01T00:00:00Z\",\"original_until\":\"2099-01-01T00:00:00Z\",\"amendments\":[],\"state\":\"detached\",\"resolution\":null,\"assessments\":[{\"state\":\"violated\",\"observer\":\"watchdog\",\"at\":\"2026-01-02T00:00:00Z\"}],\"created_at\":\"2026-01-01T00:00:00Z\"}]}\n",
         )
     );
@@ -5531,3 +5533,220 @@ fn a_missing_hostname_command_fails_with_the_spawn_error() {
 // function present in both but exercised in only one is billed as missed lines against
 // the copy that never ran it. `--show-missing-lines` and the annotated `--text` report
 // both merge the two and agree on the nineteen lines above.
+
+#[test]
+fn on_time_uses_current_horizon_and_effective_resolution() {
+    let scratch = Scratch::new();
+    let until = "2020-01-02T00:00:00Z";
+    let later = "2020-01-03T00:00:00Z";
+    for (id, at, amended, corrected, expected) in [
+        ("boundary", until, false, false, true),
+        ("early", PAST, false, false, true),
+        ("late", later, false, false, false),
+        ("replanned", later, true, false, true),
+        ("corrected", later, false, true, false),
+        ("corrected-early", PAST, false, true, true),
+    ] {
+        scratch
+            .run(&[
+                "promise", "ship", "--id", id, "--by", "a", "--to", "b", "--until", until, "--ts",
+                PAST,
+            ])
+            .expect(0);
+        if amended {
+            scratch
+                .run(&["amend", id, "--until", later, "--ts", PAST])
+                .expect(0);
+        }
+        if corrected {
+            scratch
+                .run(&[
+                    "resolve",
+                    id,
+                    "--cancelled",
+                    "--reason",
+                    "wrong",
+                    "--ts",
+                    until,
+                ])
+                .expect(0);
+            scratch
+                .run(&[
+                    "correct",
+                    id,
+                    "--as",
+                    "satisfied",
+                    "--by",
+                    "a",
+                    "--reason",
+                    "fixed",
+                    "--evidence",
+                    "sha:done",
+                    "--ts",
+                    at,
+                ])
+                .expect(0);
+        } else {
+            scratch
+                .run(&[
+                    "resolve",
+                    id,
+                    "--satisfied",
+                    "--evidence",
+                    "sha:done",
+                    "--ts",
+                    at,
+                ])
+                .expect(0);
+        }
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        assert_eq!(shown.json()["on_time"], expected, "{id}");
+        let marker = if expected {
+            "satisfied (on time)"
+        } else {
+            "satisfied (late)"
+        };
+        for args in [
+            vec!["show", id],
+            vec!["ls", "--all"],
+            vec!["ls", "--tree", "--all"],
+        ] {
+            let human = scratch.run(&args);
+            human.expect(0);
+            assert!(
+                human
+                    .stdout
+                    .lines()
+                    .any(|line| line.contains(id) && line.contains(marker)),
+                "{}",
+                human.stdout
+            );
+        }
+        let a2a = scratch.run(&["a2a", "task", "--ext", "v0", id]);
+        a2a.expect(0);
+        assert!(a2a
+            .json()
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .get("on_time")
+            .is_none());
+    }
+    let exported = scratch.run(&["export"]);
+    exported.expect(0);
+    let document = exported.json();
+    assert_eq!(document["summary"]["states"]["satisfied"], 6);
+    assert_eq!(document["summary"]["satisfied_on_time"], 4);
+    assert_eq!(document["summary"]["satisfied_late"], 2);
+    let jsonl = scratch.run(&["export", "--format", "jsonl"]);
+    jsonl.expect(0);
+    let lines: Vec<serde_json::Value> = jsonl
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(serde_json::json!(lines), document["promises"]);
+    for promise in document["promises"].as_array().unwrap() {
+        let id = promise["id"].as_str().unwrap();
+        assert_eq!(
+            promise["on_time"],
+            scratch.run(&["show", id, "--json"]).json()["on_time"]
+        );
+        assert_eq!(promise["original_until"], until);
+    }
+    let filtered = scratch.run(&["export", "--state", "detached"]);
+    filtered.expect(0);
+    assert_eq!(filtered.json()["summary"]["satisfied_on_time"], 0);
+    assert_eq!(filtered.json()["summary"]["satisfied_late"], 0);
+}
+
+#[test]
+fn on_time_is_absent_for_every_non_satisfied_state() {
+    let scratch = Scratch::new();
+    for state in [
+        "detached",
+        "overdue",
+        "conditional",
+        "expired",
+        "released",
+        "cancelled",
+        "refused",
+        "lapsed",
+    ] {
+        let until = if matches!(state, "overdue" | "lapsed") {
+            PAST
+        } else {
+            FUTURE
+        };
+        let mut args = vec![
+            "promise", "ship", "--id", state, "--by", "a", "--to", "b", "--until", until,
+        ];
+        if state == "conditional" {
+            args.extend(["--on", "unknown"]);
+        }
+        if state == "expired" {
+            args.extend(["--on", "cancelled"]);
+        }
+        scratch.run(&args).expect(0);
+        if matches!(state, "released" | "cancelled" | "refused" | "lapsed") {
+            scratch
+                .run(&[
+                    "resolve",
+                    state,
+                    &format!("--{state}"),
+                    "--by",
+                    "a",
+                    "--reason",
+                    "ended",
+                ])
+                .expect(0);
+        }
+    }
+    let exported = scratch.run(&["export"]);
+    exported.expect(0);
+    for promise in exported.json()["promises"].as_array().unwrap() {
+        let id = promise["id"].as_str().unwrap();
+        assert_eq!(promise["state"], id);
+        assert!(promise.get("on_time").is_none(), "{promise}");
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        assert!(shown.json().get("on_time").is_none(), "{}", shown.stdout);
+    }
+    let jsonl = scratch.run(&["export", "--format", "jsonl"]);
+    jsonl.expect(0);
+    for line in jsonl.stdout.lines() {
+        let promise: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(promise.get("on_time").is_none());
+    }
+}
+
+#[test]
+fn on_time_rejects_unreadable_satisfaction_instants() {
+    for field in ["ts", "until"] {
+        let scratch = Scratch::new();
+        let id = scratch.promise("ship", "a", "b", FUTURE);
+        scratch
+            .run(&["resolve", &id, "--satisfied", "--evidence", "sha:done"])
+            .expect(0);
+        scratch.rewrite(|_, event| {
+            event.insert(field.into(), serde_json::json!("not-an-instant"));
+        });
+        for args in [
+            vec!["show", &id, "--json"],
+            vec!["show", &id],
+            vec!["ls", "--all"],
+            vec!["export"],
+        ] {
+            let run = scratch.run(&args);
+            run.expect(1);
+            assert!(
+                run.stderr.contains("cannot compute on_time"),
+                "{}",
+                run.stderr
+            );
+        }
+    }
+}
