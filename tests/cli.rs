@@ -5750,3 +5750,231 @@ fn on_time_rejects_unreadable_satisfaction_instants() {
         }
     }
 }
+
+#[test]
+fn dependents_mark_only_moves_at_or_after_declaration() {
+    let scratch = Scratch::new();
+    let amended = "2020-01-02T00:00:00Z";
+    for (id, declared, marked) in [
+        ("before", PAST, true),
+        ("equal", amended, true),
+        ("offset", "2020-01-02T01:00:00+01:00", true),
+        ("after", "2020-01-03T00:00:00Z", false),
+    ] {
+        scratch
+            .run(&[
+                "promise", "upstream", "--id", id, "--by", "a", "--to", "b", "--until", PAST,
+                "--ts", PAST,
+            ])
+            .expect(0);
+        // Append the amend before the dependent, even when the dependent's supplied
+        // declaration time precedes it. The fact is timestamp-based, not log order.
+        scratch
+            .run(&["amend", id, "--until", FUTURE, "--ts", amended])
+            .expect(0);
+        let child = format!("{id}-child");
+        scratch
+            .run(&[
+                "promise",
+                "downstream",
+                "--id",
+                &child,
+                "--by",
+                "b",
+                "--to",
+                "c",
+                "--until",
+                FUTURE,
+                "--on",
+                id,
+                "--ts",
+                declared,
+            ])
+            .expect(0);
+        // Keep the raw offset in the imported ledger: CLI timestamps normalize to UTC.
+        scratch.rewrite(|_, event| {
+            if event.get("id").and_then(|id| id.as_str()) == Some(&child) {
+                event.insert("ts".into(), serde_json::json!(declared));
+            }
+        });
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        let detail = shown.json();
+        assert_eq!(
+            detail["dependents"],
+            serde_json::json!([{"id": child, "by":"b", "state":"conditional"}])
+        );
+        assert!(detail["horizons"][0]
+            .get("moved_after_dependents")
+            .is_none());
+        assert_eq!(
+            detail["horizons"][1].get("moved_after_dependents"),
+            marked.then_some(&serde_json::Value::Bool(true)),
+            "{id}"
+        );
+        let human = scratch.run(&["show", id]);
+        human.expect(0);
+        assert!(
+            human
+                .stdout
+                .contains(&format!("    {child}  b  conditional")),
+            "{}",
+            human.stdout
+        );
+        assert_eq!(
+            human.stdout.contains("(moved after dependents)"),
+            marked,
+            "{}",
+            human.stdout
+        );
+        // CLI facts must not spill into the A2A binding, even for marked horizons.
+        let a2a = scratch.run(&["a2a", "task", "--seat", "aaif", "--node", "box", id]);
+        a2a.expect(0);
+        let record = &a2a.json()[V1_KEY][0];
+        assert!(record.get("dependents").is_none());
+        assert!(record["horizons"][1]
+            .get("moved_after_dependents")
+            .is_none());
+    }
+    let exported = scratch.run(&["export", "--debtor", "a"]);
+    exported.expect(0);
+    let document = exported.json();
+    assert_eq!(document["promises"].as_array().unwrap().len(), 4);
+    let jsonl = scratch.run(&["export", "--format", "jsonl", "--debtor", "a"]);
+    jsonl.expect(0);
+    let lines: Vec<serde_json::Value> = jsonl
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(serde_json::json!(lines), document["promises"]);
+    for row in document["promises"].as_array().unwrap() {
+        let id = row["id"].as_str().unwrap();
+        let shown = scratch.run(&["show", id, "--json"]).json();
+        assert_eq!(
+            row["dependents"], shown["dependents"],
+            "filtered-out dependents remain visible"
+        );
+        assert_eq!(
+            row["amendments"][0].get("moved_after_dependents"),
+            shown["horizons"][1].get("moved_after_dependents")
+        );
+    }
+}
+
+#[test]
+fn dependents_are_direct_and_include_resolved_promises() {
+    let scratch = Scratch::new();
+    for (id, on) in [
+        ("A", None),
+        ("B", Some("A")),
+        ("C", Some("B")),
+        ("D", Some("A")),
+    ] {
+        let mut args = vec![
+            "promise", "ship", "--id", id, "--by", id, "--to", "reader", "--until", FUTURE, "--ts",
+            PAST,
+        ];
+        if let Some(on) = on {
+            args.extend(["--on", on]);
+        }
+        scratch.run(&args).expect(0);
+    }
+    scratch
+        .run(&[
+            "resolve",
+            "B",
+            "--satisfied",
+            "--evidence",
+            "sha:done",
+            "--ts",
+            PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&["amend", "A", "--until", FUTURE, "--ts", PAST])
+        .expect(0);
+    for (id, expected) in [
+        (
+            "A",
+            serde_json::json!([{"id":"B", "by":"B", "state":"satisfied"}, {"id":"D", "by":"D", "state":"conditional"}]),
+        ),
+        (
+            "B",
+            serde_json::json!([{"id":"C", "by":"C", "state":"detached"}]),
+        ),
+    ] {
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        assert_eq!(shown.json()["dependents"], expected);
+    }
+    let a = scratch.run(&["show", "A"]);
+    a.expect(0);
+    assert!(a.stdout.contains("    B  B  satisfied"));
+    assert!(!a.stdout.contains("    C  C"));
+    assert_eq!(
+        scratch.run(&["show", "A", "--json"]).json()["horizons"][1]["moved_after_dependents"],
+        true
+    );
+    // A leaf and a promise with no edges omit the list; their moves are unmarked.
+    scratch
+        .run(&["amend", "C", "--until", FUTURE, "--ts", PAST])
+        .expect(0);
+    scratch.promise("isolated", "alone", "reader", FUTURE);
+    let exported = scratch.run(&["export"]);
+    exported.expect(0);
+    for row in exported.json()["promises"].as_array().unwrap() {
+        let id = row["id"].as_str().unwrap();
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        assert_eq!(row.get("dependents"), shown.json().get("dependents"));
+        if !matches!(id, "A" | "B") {
+            assert!(row.get("dependents").is_none());
+            assert!(!scratch.run(&["show", id]).stdout.contains("dependents"));
+        }
+    }
+    let leaf = scratch.run(&["show", "C", "--json"]).json();
+    assert!(leaf["horizons"][1].get("moved_after_dependents").is_none());
+}
+
+#[test]
+fn dependents_reject_unreadable_times_needed_for_move_facts() {
+    for kind in ["promise", "amend"] {
+        let scratch = Scratch::new();
+        let id = scratch.promise("upstream", "a", "b", FUTURE);
+        scratch
+            .run(&[
+                "promise",
+                "downstream",
+                "--by",
+                "b",
+                "--to",
+                "c",
+                "--until",
+                FUTURE,
+                "--on",
+                &id,
+            ])
+            .expect(0);
+        scratch.run(&["amend", &id, "--until", FUTURE]).expect(0);
+        scratch.rewrite(|_, event| {
+            if event["type"] == kind {
+                event.insert("ts".into(), serde_json::json!("not-an-instant"));
+            }
+        });
+        for args in [
+            vec!["show", &id, "--json"],
+            vec!["show", &id],
+            vec!["export"],
+            vec!["export", "--format", "jsonl"],
+        ] {
+            let run = scratch.run(&args);
+            run.expect(1);
+            assert!(
+                run.stderr.contains("cannot compute moved_after_dependents"),
+                "{}",
+                run.stderr
+            );
+        }
+    }
+}

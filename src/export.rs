@@ -14,8 +14,10 @@ use serde::Serialize;
 use crate::cli::{ExportArgs, ExportFormat};
 use crate::event::{EventBody, Resolution};
 use crate::record::{Meta, Promise};
-use crate::state::{fold, PromiseView, State};
-use crate::verbs::{on_time, read_existing_ledger, Fail};
+use crate::state::{fold, Fold, PromiseView, State};
+use crate::verbs::{
+    dependents, moved_after_dependents, on_time, read_existing_ledger, Dependent, Fail,
+};
 
 #[derive(Serialize)]
 struct Document<'a> {
@@ -42,6 +44,8 @@ struct ExportPromise<'a> {
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     on_time: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dependents: Vec<Dependent<'a>>,
     resolution: Option<ResolutionView<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     corrections: Vec<Correction<'a>>,
@@ -51,6 +55,8 @@ struct ExportPromise<'a> {
 
 #[derive(Serialize)]
 struct Amendment<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_after_dependents: Option<bool>,
     until: &'a str,
     by: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,7 +165,7 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
     selected.sort_by_key(|view| (time_key(view.horizons[0].ts), view.id()));
     let promises: Vec<ExportPromise<'_>> = selected
         .into_iter()
-        .map(project)
+        .map(|view| project(view, &folded))
         .collect::<Result<_, _>>()?;
 
     match args.format {
@@ -177,7 +183,7 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
                 states.insert(state.as_str(), 0);
             }
             for promise in &promises {
-                // Keep v1 output for ledgers without the new vocabulary byte-identical.
+                // Keep optional outcome counters absent until that vocabulary appears.
                 if matches!(promise.state, "lapsed" | "refused") {
                     states.entry(promise.state).or_insert(0);
                 }
@@ -220,18 +226,21 @@ fn time_key(ts: &str) -> (Option<Timestamp>, &str) {
     (Timestamp::from_str(ts).ok(), ts)
 }
 
-fn project<'a>(view: &'a PromiseView<'a>) -> Result<ExportPromise<'a>, Fail> {
+fn project<'a>(view: &'a PromiseView<'a>, folded: &Fold<'a>) -> Result<ExportPromise<'a>, Fail> {
     let mut amendments: Vec<Amendment<'_>> = view
         .amendments()
         .iter()
-        .map(|horizon| Amendment {
-            until: horizon.until,
-            by: horizon.by,
-            reason: horizon.reason,
-            at: horizon.ts,
-            meta: horizon.meta,
+        .map(|horizon| {
+            Ok(Amendment {
+                moved_after_dependents: moved_after_dependents(folded, view.id(), horizon.ts)?,
+                until: horizon.until,
+                by: horizon.by,
+                reason: horizon.reason,
+                at: horizon.ts,
+                meta: horizon.meta,
+            })
         })
-        .collect();
+        .collect::<Result<_, Fail>>()?;
     amendments.sort_by_key(|amendment| time_key(amendment.at));
 
     let resolution = view.resolution.and_then(|event| {
@@ -309,6 +318,7 @@ fn project<'a>(view: &'a PromiseView<'a>) -> Result<ExportPromise<'a>, Fail> {
         amendments,
         state: view.state.as_str(),
         on_time: on_time(view)?,
+        dependents: dependents(folded, view.id()),
         resolution,
         corrections,
         assessments,

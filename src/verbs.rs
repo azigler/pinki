@@ -1074,6 +1074,41 @@ struct ShowDetail<'a> {
     detail: Detail<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     on_time: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dependents: Vec<Dependent<'a>>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct Dependent<'a> {
+    id: &'a str,
+    by: &'a str,
+    state: &'static str,
+}
+
+pub(crate) fn dependents<'a>(folded: &Fold<'a>, id: &str) -> Vec<Dependent<'a>> {
+    folded
+        .dependents(id)
+        .map(|view| Dependent {
+            id: view.id(),
+            by: &view.record.by,
+            state: view.state.as_str(),
+        })
+        .collect()
+}
+
+pub(crate) fn moved_after_dependents(
+    folded: &Fold<'_>,
+    id: &str,
+    ts: &str,
+) -> Result<Option<bool>, Fail> {
+    folded
+        .moved_after_dependents(id, ts)
+        .map(|moved| moved.then_some(true))
+        .map_err(|e| {
+            Fail::Op(format!(
+                "cannot compute moved_after_dependents for `{id}`: {e}"
+            ))
+        })
 }
 
 pub(crate) fn on_time(view: &PromiseView<'_>) -> Result<Option<bool>, Fail> {
@@ -1120,6 +1155,8 @@ struct Detail<'a> {
 
 #[derive(Serialize)]
 struct HorizonJson<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_after_dependents: Option<bool>,
     ts: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<&'a str>,
@@ -1259,6 +1296,7 @@ fn detail<'a>(view: &'a PromiseView<'a>) -> Detail<'a> {
         .horizons
         .iter()
         .map(|horizon| HorizonJson {
+            moved_after_dependents: None,
             ts: horizon.ts,
             source: horizon.source,
             until: horizon.until,
@@ -1355,7 +1393,11 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         return Ok(());
     }
 
-    let detail = detail(view);
+    let mut detail = detail(view);
+    for horizon in detail.horizons.iter_mut().skip(1) {
+        horizon.moved_after_dependents = moved_after_dependents(&folded, view.id(), horizon.ts)?;
+    }
+    let dependents = dependents(&folded, view.id());
     // The superseding line's own state, for the text block: "superseded by <ts>
     // (retracted)" says whether the observer corrected itself or withdrew.
     let superseding_state: Vec<Option<&str>> = view
@@ -1374,7 +1416,8 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             "{}",
             encode(&ShowDetail {
                 detail,
-                on_time: on_time(view)?
+                on_time: on_time(view)?,
+                dependents,
             })?
         );
         return Ok(());
@@ -1408,6 +1451,16 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         println!("  meta         {}", one_line(meta));
     }
 
+    if !dependents.is_empty() {
+        println!("  dependents");
+        for dependent in &dependents {
+            println!(
+                "    {}  {}  {}",
+                dependent.id, dependent.by, dependent.state
+            );
+        }
+    }
+
     // Only printed when the deadline actually moved: an unamended promise has exactly
     // one horizon, and a list of one is noise. When it did move, every horizon is here
     // in order — §4: the deadline history stays auditable, which is the difference
@@ -1415,7 +1468,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     if !view.amendments().is_empty() {
         println!("  horizons");
         for (index, horizon) in horizons.iter().enumerate() {
-            let note = if index == 0 {
+            let mut note = if index == 0 {
                 "  (declared)".to_string()
             } else {
                 horizon
@@ -1423,6 +1476,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                     .map(|reason| format!("  {reason}"))
                     .unwrap_or_default()
             };
+            if horizon.moved_after_dependents == Some(true) {
+                note.push_str("  (moved after dependents)");
+            }
             println!(
                 "    {}  {}  {}{note}{}",
                 horizon.ts,

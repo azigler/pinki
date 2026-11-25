@@ -61,10 +61,9 @@ pub const RETRACTED: &str = "retracted";
 
 /// One line of the ledger.
 ///
-/// `ts` is kept as the raw ISO-8601 string it arrived as. The fold never compares
-/// event timestamps — only `until` against an injected `now` — so parsing them would
-/// buy nothing and would let a ledger line become unreadable over a field nothing
-/// reads.
+/// `ts` is kept as the raw ISO-8601 string it arrived as. Event selection uses log
+/// order. Timestamp-derived facts parse instants when needed and report unreadable
+/// values without making the original ledger line unreadable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub ts: String,

@@ -255,6 +255,28 @@ impl<'a> Fold<'a> {
         self.get(id).map(|view| view.state)
     }
 
+    /// Direct dependents, including resolved promises, in declaration order.
+    pub fn dependents(&self, id: &str) -> impl Iterator<Item = &PromiseView<'a>> {
+        self.children
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter_map(|child| self.get(child))
+    }
+
+    /// A horizon move made at or after a direct dependent's declaration timestamp.
+    /// This compares instants without changing the log order used to select events.
+    pub fn moved_after_dependents(&self, id: &str, ts: &str) -> Result<bool, jiff::Error> {
+        for dependent in self.dependents(id) {
+            let declared = Timestamp::from_str(dependent.horizons[0].ts)?;
+            let amended = Timestamp::from_str(ts)?;
+            if declared <= amended {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Walk the reverse `on` edges in declaration order, using the fold's views and
     /// child index. `allowed` can project a filtered forest; a hidden parent is then
     /// a boundary rather than a route to hidden descendants. For a forest, also
@@ -317,7 +339,7 @@ impl<'a> Fold<'a> {
 ///
 /// `amend` and authorized `correct` take the **last** line rather than the first: a
 /// horizon or outcome is meant to move, and the newest is the current one. "Newest" is log order,
-/// not `ts` order — this module never compares event timestamps, and a ledger whose
+/// not `ts` order — timestamp-derived facts never reorder events, and a ledger whose
 /// lines are out of order is not one whose clock we can trust to sort them.
 pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
     let mut order: Vec<&'a str> = Vec::new();

@@ -13,6 +13,11 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- `show` and both export formats list direct `dependents`, including resolved
+  promises, with id, debtor and state. Horizon moves at or after a dependent's
+  declaration timestamp carry `moved_after_dependents: true`; human `show`
+  marks those moves in its horizon history (#36). No notifications are sent.
+
 - Satisfied promises carry `on_time` in `show --json` and both export formats.
   The fact compares the effective resolution timestamp (including authorized
   corrections) with the current amended deadline. Human `show` and `ls` mark
