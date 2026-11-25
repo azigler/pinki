@@ -276,25 +276,6 @@ Given the record and the log, any two implementations produce the same answer.
 | `refused` | Resolved by the debtor saying the work will not be done |
 | `expired` | The antecedent ended without being satisfied — never became owed |
 
-### Refusal has two parties
-
-`resolve --refused` stays terminal on the debtor's word ([#33](https://github.com/azigler/pinki/issues/33),
-option 1). The debtor's refusal ends the debtor's obligation and records its reason.
-The creditor's answer is its own attributed act. A creditor who disagrees uses
-`assess --violated`; that assessment never gates the refusal. A refusal never
-clears a promise silently: the reason is required and visible in `show` and `export`.
-We weighed a non-terminal `decline` verb and did not adopt it. It would spend the
-bloat budget on another verb when the assessment already carries the creditor's view.
-
-### Each round is a new promise
-
-Recurring or renewing promises are out of scope. One promise has one horizon and
-one outcome. A recurring promise would need a schedule and partial outcomes, which
-pinki does not model. Declare each round as a new promise with `--on` set to the
-previous round's id, and resolve each round on its own. This keeps the dependency
-rule: the next round becomes owed only when the previous round is satisfied.
-Read the chain with `show` (direct dependents, new in Unreleased) and `ls --tree --all`.
-
 ### Asserted states — speech acts, attributed to whoever said them
 
 | State | Who says it |
@@ -344,6 +325,34 @@ a judgment made while the promise was open from one made against a settled recor
 `show` marks each one: `after_resolution` in `--json`, and `made before resolution` or
 `made after resolution` in text once the promise is resolved. That is all. Whether the
 late judgment matters is the reader's call.
+
+### Refusal has two parties
+
+`resolve --refused` stays terminal on the debtor's word ([#33](https://github.com/azigler/pinki/issues/33),
+option 1). The debtor's refusal ends the debtor's obligation and records its reason.
+The creditor's answer is its own attributed act. A creditor who disagrees uses
+`assess ID --violated --observer WHO`; that assessment never gates the refusal.
+A refusal never clears a promise silently: the reason is required and visible
+in `show` and `export`.
+We weighed a non-terminal `decline` verb and did not adopt it. It would spend the
+bloat budget on another verb when the assessment already carries the creditor's view.
+The cost is no record for "debtor declined, creditor has not decided yet"; the
+creditor's silence is that state.
+
+### Each round is a new promise
+
+Recurring or renewing promises are out of scope. One promise has one current
+horizon and one outcome. A recurring promise would need a schedule and partial outcomes, which
+pinki does not model. Declare each round as a new promise with `--on` set to the
+previous round's id, and resolve each round on its own. This keeps the dependency
+rule: the next round becomes owed only when the previous round is satisfied.
+If a round ends unsatisfied (`cancelled`, `released`, `lapsed`, `refused`, or
+`expired`), every round declared `--on` it becomes `expired`, down the whole
+chain, with no warning. To continue the series, declare the next round `--on`
+the last satisfied round, or without `--on` if none was satisfied. The
+unsatisfied round stays in the ledger as the record.
+Read direct dependents with `show`, longer chains with `show ID --waiters`,
+and the full tree with `ls --tree --all`.
 
 ---
 

@@ -153,8 +153,16 @@ than a double holds is rounded). Keep a value that must stay exact as a string.
 
 Declare each round as a new promise with `--on` set to the previous round's id.
 Resolve each round on its own. The next round becomes owed when the previous round
-is satisfied. pinki does not schedule or renew promises. Here `$id` is the review
-already satisfied above; this declares and resolves its next round.
+is satisfied. pinki does not schedule or renew promises.
+
+If a round ends unsatisfied (`cancelled`, `released`, `lapsed`, `refused`, or
+`expired`), every round declared `--on` it becomes `expired`, down the whole
+chain, with no warning. To continue the series, declare the next round `--on`
+the last satisfied round, or without `--on` if none was satisfied. The
+unsatisfied round stays in the ledger as the record.
+
+Here `$id` is the review already satisfied above; its next round is born
+`detached` (owed now), then resolved.
 
 ```sh
 round_receipt=$(pinki promise "Review the next schema revision" \
@@ -167,8 +175,8 @@ pinki show "$id"
 pinki ls --tree --all
 ```
 
-`show` lists direct dependents (new in Unreleased). `ls --tree --all` shows the
-chain, including resolved rounds.
+`show` lists direct dependents only. Use `show ID --waiters` for chains of more
+than two rounds. `ls --tree --all` shows the chain, including resolved rounds.
 
 ## States and exit codes
 
