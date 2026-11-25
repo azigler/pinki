@@ -13,6 +13,19 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- `show` and both export formats list direct `dependents`, including resolved
+  promises, with id, debtor and state, excluding self-links. Horizon moves after
+  a dependent's declaration carry `moved_after_dependents: true`; equal instants
+  use log order. Unreadable instants omit the fact without failing reads. Human
+  `show` marks those moves in its horizon history (#36). No notifications are sent.
+
+- Satisfied promises carry `on_time` in `show --json` and both export formats.
+  The fact compares the winning resolve timestamp with the current amended
+  deadline; corrections relabel only the outcome. Human `show` and `ls` mark
+  satisfaction as on time or late, or leave it plain if an instant is unreadable.
+  When satisfied promises exist, export summary splits their total into
+  `satisfied_on_time`, `satisfied_late`, and `satisfied_unknown` (#34).
+
 - A2A v1 records carry `provenance.record_ref` beside `ledger_ref`:
   `HOST:sha256:<digest>` over only that promise's own ledger lines (its
   declaration, amends, resolution, corrections and assessments, plus the

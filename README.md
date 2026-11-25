@@ -53,10 +53,38 @@ pinki ls --json
 ```
 
 `show` gives one promise, its current deadline, resolution, corrections, and assessments.
+Satisfied promises show `satisfied (on time)` or `satisfied (late)` in human `show`
+and `ls`. `show --json` and both export formats include `on_time`: true when the
+winning resolve timestamp is at or before the **current** `until`, after
+amends. A correction relabels the outcome but keeps that original resolve instant.
+Other states omit `on_time`, following the optional-field convention. If a needed
+instant is unreadable, the fact is omitted and human output prints plain `satisfied`;
+reads still succeed. Export keeps `original_until` and `summary.states.satisfied`.
+When that total is positive, `summary.satisfied_on_time`, `summary.satisfied_late`,
+and `summary.satisfied_unknown` sum to it; all three keys are absent otherwise.
+A debtor who resolves early with another outcome and corrects to satisfied after
+late delivery reads as on time; the correction's reason carries that story.
 
 ```sh
 pinki show "$id" --json
 ```
+
+`show` and both export formats also list direct `dependents`: promises whose
+`on` names this id, with each dependent's `id`, `by`, and computed `state`.
+Resolved dependents stay listed; a promise never lists itself. The field is
+omitted when the list is empty.
+Export filters select the outer promises; each selected promise still lists all
+of its direct dependents. Indirect dependents belong to the existing `--waiters`
+view below.
+
+An amendment made after any direct dependent's declaration timestamp
+carries `moved_after_dependents: true` in `show --json` horizons and export
+amendments. Human `show` adds `(moved after dependents)` to that history entry.
+Otherwise the field is absent, including on the original declaration. Comparison
+uses timestamp instants across UTC offsets. Equal instants use log order: only a
+dependent logged before the amend marks it. Log order still selects the current
+deadline. If any needed timestamp is unreadable, that amend's fact is omitted
+and reads still succeed. These facts make no judgment and send no notification.
 
 The `on` edge links a promise to the one it waits for. `ls --tree` shows the
 forest, with each promise's computed state. `show ID --waiters` lists every

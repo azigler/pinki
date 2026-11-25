@@ -14,8 +14,8 @@ use serde::Serialize;
 use crate::cli::{ExportArgs, ExportFormat};
 use crate::event::{EventBody, Resolution};
 use crate::record::{Meta, Promise};
-use crate::state::{fold, PromiseView, State};
-use crate::verbs::{read_existing_ledger, Fail};
+use crate::state::{fold, Fold, PromiseView, State};
+use crate::verbs::{dependents, moved_after_dependents, read_existing_ledger, Dependent, Fail};
 
 #[derive(Serialize)]
 struct Document<'a> {
@@ -29,6 +29,12 @@ struct Document<'a> {
 struct Summary {
     total: usize,
     states: BTreeMap<&'static str, usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    satisfied_on_time: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    satisfied_late: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    satisfied_unknown: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -38,6 +44,10 @@ struct ExportPromise<'a> {
     original_until: &'a str,
     amendments: Vec<Amendment<'a>>,
     state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_time: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dependents: Vec<Dependent<'a>>,
     resolution: Option<ResolutionView<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     corrections: Vec<Correction<'a>>,
@@ -47,6 +57,8 @@ struct ExportPromise<'a> {
 
 #[derive(Serialize)]
 struct Amendment<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_after_dependents: Option<bool>,
     until: &'a str,
     by: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,7 +165,10 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
     // Timestamps in a hand-written ledger may carry different offsets. Compare
     // instants when possible, then the raw text and id for a stable total order.
     selected.sort_by_key(|view| (time_key(view.horizons[0].ts), view.id()));
-    let promises: Vec<ExportPromise<'_>> = selected.into_iter().map(project).collect();
+    let promises: Vec<ExportPromise<'_>> = selected
+        .into_iter()
+        .map(|view| project(view, &folded))
+        .collect();
 
     match args.format {
         ExportFormat::Json => {
@@ -170,7 +185,7 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
                 states.insert(state.as_str(), 0);
             }
             for promise in &promises {
-                // Keep v1 output for ledgers without the new vocabulary byte-identical.
+                // Keep optional outcome counters absent until that vocabulary appears.
                 if matches!(promise.state, "lapsed" | "refused") {
                     states.entry(promise.state).or_insert(0);
                 }
@@ -178,11 +193,22 @@ pub fn run(args: ExportArgs) -> Result<(), Fail> {
                     .get_mut(promise.state)
                     .expect("every folded state is named") += 1;
             }
+            let has_satisfied = states["satisfied"] > 0;
             let document = Document {
                 format: "pinki-export",
                 version: 1,
                 summary: Summary {
                     total: promises.len(),
+                    satisfied_on_time: has_satisfied
+                        .then(|| promises.iter().filter(|p| p.on_time == Some(true)).count()),
+                    satisfied_late: has_satisfied
+                        .then(|| promises.iter().filter(|p| p.on_time == Some(false)).count()),
+                    satisfied_unknown: has_satisfied.then(|| {
+                        promises
+                            .iter()
+                            .filter(|p| p.state == "satisfied" && p.on_time.is_none())
+                            .count()
+                    }),
                     states,
                 },
                 promises,
@@ -211,11 +237,12 @@ fn time_key(ts: &str) -> (Option<Timestamp>, &str) {
     (Timestamp::from_str(ts).ok(), ts)
 }
 
-fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
+fn project<'a>(view: &'a PromiseView<'a>, folded: &Fold<'a>) -> ExportPromise<'a> {
     let mut amendments: Vec<Amendment<'_>> = view
         .amendments()
         .iter()
         .map(|horizon| Amendment {
+            moved_after_dependents: moved_after_dependents(folded, view.id(), horizon),
             until: horizon.until,
             by: horizon.by,
             reason: horizon.reason,
@@ -299,6 +326,8 @@ fn project<'a>(view: &'a PromiseView<'a>) -> ExportPromise<'a> {
         original_until: view.record.until.as_str(),
         amendments,
         state: view.state.as_str(),
+        on_time: view.on_time(),
+        dependents: dependents(folded, view.id()),
         resolution,
         corrections,
         assessments,

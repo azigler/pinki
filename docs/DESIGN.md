@@ -624,9 +624,20 @@ same bytes as before. The export only reports the fold's relations; it does not
 choose a winning judgment (§3, §7).
 
 Version 1 export also includes `corrections` in log order when present. It omits
-that field when empty, so an old ledger exports byte-identically. The original
-`resolution` remains the first resolve; each correction carries its outcome, author,
+that field when empty, so adding correction support preserves bytes for ledgers
+with no corrections. The original `resolution` remains the first resolve; each correction carries its outcome, author,
 reason, timestamp, source when known, and evidence when supplied.
+
+Version 1 also carries `on_time` on satisfied promises, comparing the winning
+resolve instant with the current `until`. It is absent for other states or when
+an instant is unreadable. The summary includes `satisfied_on_time`, `satisfied_late`,
+and `satisfied_unknown` only when `states.satisfied` is positive; they sum to that
+total. Direct `dependents` omit self-links and are absent when empty.
+`moved_after_dependents` is present only when true, and absent when false or
+unknown. It compares declaration and amend instants, using log order to break
+equal-instant ties; an unreadable needed instant makes that amend's fact unknown.
+These are optional additions: a ledger with none of these facts and no satisfied
+promises exports the same bytes as before.
 
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
 explicit one that disagrees. `--reason` is encouraged, not required: an escalation

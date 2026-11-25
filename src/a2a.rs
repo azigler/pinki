@@ -68,9 +68,9 @@ fn card_for(uri: &'static str) -> Result<String, serde_json::Error> {
 ///
 /// This is the object you merge into a `Task`'s `metadata`, not a whole `Task`.
 /// pinki has no A2A task `status` and no way to learn one, so it emits no fabricated
-/// Task envelope. The value is the same detail read model as `show --json`, with the
-/// declaration still at the same path for older readers. Provenance belongs to
-/// the extension value, not the A2A Task envelope.
+/// Task envelope. The value uses the shared base detail model, without the computed
+/// facts added only by show/export. The declaration keeps its path. Provenance
+/// belongs to the extension value, not the A2A Task envelope.
 pub fn task_metadata<T: Serialize>(
     detail: &T,
     as_of: &str,

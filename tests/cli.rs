@@ -3996,10 +3996,12 @@ fn a2a_task_distinguishes_satisfied_from_open_and_carries_assessment_history() {
         .as_object_mut()
         .unwrap()
         .remove("provenance");
+    let mut shown = scratch.run(&["show", "delivered", "--json"]).json();
     assert_eq!(
-        without_provenance,
-        scratch.run(&["show", "delivered", "--json"]).json()
+        shown.as_object_mut().unwrap().remove("on_time"),
+        Some(serde_json::json!(true))
     );
+    assert_eq!(without_provenance, shown);
 }
 
 #[test]
@@ -5531,3 +5533,805 @@ fn a_missing_hostname_command_fails_with_the_spawn_error() {
 // function present in both but exercised in only one is billed as missed lines against
 // the copy that never ran it. `--show-missing-lines` and the annotated `--text` report
 // both merge the two and agree on the nineteen lines above.
+
+#[test]
+fn on_time_uses_current_horizon_and_winning_resolution() {
+    let scratch = Scratch::new();
+    let until = "2020-01-02T00:00:00Z";
+    let later = "2020-01-03T00:00:00Z";
+    for (id, at, amended, corrected, expected) in [
+        ("boundary", until, false, false, true),
+        ("early", PAST, false, false, true),
+        ("late", later, false, false, false),
+        ("replanned", later, true, false, true),
+        ("corrected", later, false, true, true),
+        ("corrected-early", PAST, false, true, true),
+    ] {
+        scratch
+            .run(&[
+                "promise", "ship", "--id", id, "--by", "a", "--to", "b", "--until", until, "--ts",
+                PAST,
+            ])
+            .expect(0);
+        if amended {
+            scratch
+                .run(&["amend", id, "--until", later, "--ts", PAST])
+                .expect(0);
+        }
+        if corrected {
+            scratch
+                .run(&[
+                    "resolve",
+                    id,
+                    "--cancelled",
+                    "--reason",
+                    "wrong",
+                    "--ts",
+                    until,
+                ])
+                .expect(0);
+            scratch
+                .run(&[
+                    "correct",
+                    id,
+                    "--as",
+                    "satisfied",
+                    "--by",
+                    "a",
+                    "--reason",
+                    "fixed",
+                    "--evidence",
+                    "sha:done",
+                    "--ts",
+                    at,
+                ])
+                .expect(0);
+        } else {
+            scratch
+                .run(&[
+                    "resolve",
+                    id,
+                    "--satisfied",
+                    "--evidence",
+                    "sha:done",
+                    "--ts",
+                    at,
+                ])
+                .expect(0);
+        }
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        assert_eq!(shown.json()["on_time"], expected, "{id}");
+        let marker = if expected {
+            "satisfied (on time)"
+        } else {
+            "satisfied (late)"
+        };
+        for args in [
+            vec!["show", id],
+            vec!["ls", "--all"],
+            vec!["ls", "--tree", "--all"],
+        ] {
+            let human = scratch.run(&args);
+            human.expect(0);
+            assert!(
+                human
+                    .stdout
+                    .lines()
+                    .any(|line| line.contains(id) && line.contains(marker)),
+                "{}",
+                human.stdout
+            );
+        }
+        let a2a = scratch.run(&["a2a", "task", "--ext", "v0", id]);
+        a2a.expect(0);
+        assert!(a2a
+            .json()
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .get("on_time")
+            .is_none());
+    }
+    let exported = scratch.run(&["export"]);
+    exported.expect(0);
+    let document = exported.json();
+    assert_eq!(document["summary"]["states"]["satisfied"], 6);
+    assert_eq!(document["summary"]["satisfied_on_time"], 5);
+    assert_eq!(document["summary"]["satisfied_late"], 1);
+    let jsonl = scratch.run(&["export", "--format", "jsonl"]);
+    jsonl.expect(0);
+    let lines: Vec<serde_json::Value> = jsonl
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(serde_json::json!(lines), document["promises"]);
+    for promise in document["promises"].as_array().unwrap() {
+        let id = promise["id"].as_str().unwrap();
+        assert_eq!(
+            promise["on_time"],
+            scratch.run(&["show", id, "--json"]).json()["on_time"]
+        );
+        assert_eq!(promise["original_until"], until);
+    }
+    let filtered = scratch.run(&["export", "--state", "detached"]);
+    filtered.expect(0);
+    assert_eq!(document["summary"]["satisfied_unknown"], 0);
+    for key in ["satisfied_on_time", "satisfied_late", "satisfied_unknown"] {
+        assert!(filtered.json()["summary"].get(key).is_none());
+    }
+}
+
+#[test]
+fn on_time_is_absent_for_every_non_satisfied_state() {
+    let scratch = Scratch::new();
+    for state in [
+        "detached",
+        "overdue",
+        "conditional",
+        "expired",
+        "released",
+        "cancelled",
+        "refused",
+        "lapsed",
+    ] {
+        let until = if matches!(state, "overdue" | "lapsed") {
+            PAST
+        } else {
+            FUTURE
+        };
+        let mut args = vec![
+            "promise", "ship", "--id", state, "--by", "a", "--to", "b", "--until", until,
+        ];
+        if state == "conditional" {
+            args.extend(["--on", "unknown"]);
+        }
+        if state == "expired" {
+            args.extend(["--on", "cancelled"]);
+        }
+        scratch.run(&args).expect(0);
+        if matches!(state, "released" | "cancelled" | "refused" | "lapsed") {
+            scratch
+                .run(&[
+                    "resolve",
+                    state,
+                    &format!("--{state}"),
+                    "--by",
+                    "a",
+                    "--reason",
+                    "ended",
+                ])
+                .expect(0);
+        }
+    }
+    let exported = scratch.run(&["export"]);
+    exported.expect(0);
+    for promise in exported.json()["promises"].as_array().unwrap() {
+        let id = promise["id"].as_str().unwrap();
+        assert_eq!(promise["state"], id);
+        assert!(promise.get("on_time").is_none(), "{promise}");
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        assert!(shown.json().get("on_time").is_none(), "{}", shown.stdout);
+    }
+    let jsonl = scratch.run(&["export", "--format", "jsonl"]);
+    jsonl.expect(0);
+    for line in jsonl.stdout.lines() {
+        let promise: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(promise.get("on_time").is_none());
+    }
+}
+
+#[test]
+fn on_time_omits_unreadable_satisfaction_instants() {
+    for field in ["ts", "until"] {
+        let scratch = Scratch::new();
+        let id = scratch.promise("ship", "a", "b", FUTURE);
+        scratch
+            .run(&["resolve", &id, "--satisfied", "--evidence", "sha:done"])
+            .expect(0);
+        scratch.rewrite(|_, event| {
+            event.insert(field.into(), serde_json::json!("not-an-instant"));
+        });
+        for args in [
+            vec!["show", &id, "--json"],
+            vec!["show", &id],
+            vec!["ls", "--all"],
+            vec!["export"],
+        ] {
+            let run = scratch.run(&args);
+            run.expect(0);
+            assert!(run.stdout.contains(&id));
+            assert!(!run.stdout.contains("satisfied ("));
+        }
+        let shown = scratch.run(&["show", &id, "--json"]).json();
+        assert_eq!(shown["state"], "satisfied");
+        assert!(shown.get("on_time").is_none());
+        let exported = scratch.run(&["export"]).json();
+        assert_eq!(exported["promises"][0]["id"], id);
+        assert!(exported["promises"][0].get("on_time").is_none());
+        assert_eq!(exported["summary"]["satisfied_unknown"], 1);
+    }
+}
+
+#[test]
+fn dependents_mark_only_moves_at_or_after_declaration() {
+    let scratch = Scratch::new();
+    let amended = "2020-01-02T00:00:00Z";
+    for (id, declared, marked) in [
+        ("before", PAST, true),
+        ("equal", amended, false),
+        ("offset", "2020-01-02T01:00:00+01:00", false),
+        ("after", "2020-01-03T00:00:00Z", false),
+    ] {
+        scratch
+            .run(&[
+                "promise", "upstream", "--id", id, "--by", "a", "--to", "b", "--until", PAST,
+                "--ts", PAST,
+            ])
+            .expect(0);
+        // Append the amend before the dependent, even when the dependent's supplied
+        // declaration time precedes it. Log order breaks equal-instant ties only.
+        scratch
+            .run(&["amend", id, "--until", FUTURE, "--ts", amended])
+            .expect(0);
+        let child = format!("{id}-child");
+        scratch
+            .run(&[
+                "promise",
+                "downstream",
+                "--id",
+                &child,
+                "--by",
+                "b",
+                "--to",
+                "c",
+                "--until",
+                FUTURE,
+                "--on",
+                id,
+                "--ts",
+                declared,
+            ])
+            .expect(0);
+        // Keep the raw offset in the imported ledger: CLI timestamps normalize to UTC.
+        scratch.rewrite(|_, event| {
+            if event.get("id").and_then(|id| id.as_str()) == Some(&child) {
+                event.insert("ts".into(), serde_json::json!(declared));
+            }
+        });
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        let detail = shown.json();
+        assert_eq!(
+            detail["dependents"],
+            serde_json::json!([{"id": child, "by":"b", "state":"conditional"}])
+        );
+        assert!(detail["horizons"][0]
+            .get("moved_after_dependents")
+            .is_none());
+        assert_eq!(
+            detail["horizons"][1].get("moved_after_dependents"),
+            marked.then_some(&serde_json::Value::Bool(true)),
+            "{id}"
+        );
+        let human = scratch.run(&["show", id]);
+        human.expect(0);
+        assert!(
+            human
+                .stdout
+                .contains(&format!("    {child}  b  conditional")),
+            "{}",
+            human.stdout
+        );
+        assert_eq!(
+            human.stdout.contains("(moved after dependents)"),
+            marked,
+            "{}",
+            human.stdout
+        );
+        // CLI facts must not spill into the A2A binding, even for marked horizons.
+        let a2a = scratch.run(&["a2a", "task", "--seat", "aaif", "--node", "box", id]);
+        a2a.expect(0);
+        let record = &a2a.json()[V1_KEY][0];
+        assert!(record.get("dependents").is_none());
+        assert!(record["horizons"][1]
+            .get("moved_after_dependents")
+            .is_none());
+    }
+    let exported = scratch.run(&["export", "--debtor", "a"]);
+    exported.expect(0);
+    let document = exported.json();
+    assert_eq!(document["promises"].as_array().unwrap().len(), 4);
+    let jsonl = scratch.run(&["export", "--format", "jsonl", "--debtor", "a"]);
+    jsonl.expect(0);
+    let lines: Vec<serde_json::Value> = jsonl
+        .stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(serde_json::json!(lines), document["promises"]);
+    for row in document["promises"].as_array().unwrap() {
+        let id = row["id"].as_str().unwrap();
+        let shown = scratch.run(&["show", id, "--json"]).json();
+        assert_eq!(
+            row["dependents"], shown["dependents"],
+            "filtered-out dependents remain visible"
+        );
+        assert_eq!(
+            row["amendments"][0].get("moved_after_dependents"),
+            shown["horizons"][1].get("moved_after_dependents")
+        );
+    }
+}
+
+#[test]
+fn dependents_are_direct_and_include_resolved_promises() {
+    let scratch = Scratch::new();
+    for (id, on) in [
+        ("A", None),
+        ("B", Some("A")),
+        ("C", Some("B")),
+        ("D", Some("A")),
+    ] {
+        let mut args = vec![
+            "promise", "ship", "--id", id, "--by", id, "--to", "reader", "--until", FUTURE, "--ts",
+            PAST,
+        ];
+        if let Some(on) = on {
+            args.extend(["--on", on]);
+        }
+        scratch.run(&args).expect(0);
+    }
+    scratch
+        .run(&[
+            "resolve",
+            "B",
+            "--satisfied",
+            "--evidence",
+            "sha:done",
+            "--ts",
+            PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&["amend", "A", "--until", FUTURE, "--ts", PAST])
+        .expect(0);
+    for (id, expected) in [
+        (
+            "A",
+            serde_json::json!([{"id":"B", "by":"B", "state":"satisfied"}, {"id":"D", "by":"D", "state":"conditional"}]),
+        ),
+        (
+            "B",
+            serde_json::json!([{"id":"C", "by":"C", "state":"detached"}]),
+        ),
+    ] {
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        assert_eq!(shown.json()["dependents"], expected);
+    }
+    let a = scratch.run(&["show", "A"]);
+    a.expect(0);
+    assert!(a.stdout.contains("    B  B  satisfied"));
+    assert!(!a.stdout.contains("    C  C"));
+    assert_eq!(
+        scratch.run(&["show", "A", "--json"]).json()["horizons"][1]["moved_after_dependents"],
+        true
+    );
+    // A leaf and a promise with no edges omit the list; their moves are unmarked.
+    scratch
+        .run(&["amend", "C", "--until", FUTURE, "--ts", PAST])
+        .expect(0);
+    scratch.promise("isolated", "alone", "reader", FUTURE);
+    let exported = scratch.run(&["export"]);
+    exported.expect(0);
+    for row in exported.json()["promises"].as_array().unwrap() {
+        let id = row["id"].as_str().unwrap();
+        let shown = scratch.run(&["show", id, "--json"]);
+        shown.expect(0);
+        assert_eq!(row.get("dependents"), shown.json().get("dependents"));
+        if !matches!(id, "A" | "B") {
+            assert!(row.get("dependents").is_none());
+            assert!(!scratch.run(&["show", id]).stdout.contains("dependents"));
+        }
+    }
+    let leaf = scratch.run(&["show", "C", "--json"]).json();
+    assert!(leaf["horizons"][1].get("moved_after_dependents").is_none());
+}
+
+#[test]
+fn dependents_omit_unreadable_times_needed_for_move_facts() {
+    for kind in ["promise", "amend"] {
+        // A valid dependent must not hide an unknown one, in either log order.
+        for children in [["bad", "good"], ["good", "bad"]] {
+            let scratch = Scratch::new();
+            scratch
+                .run(&[
+                    "promise", "upstream", "--id", "A", "--by", "a", "--to", "b", "--until",
+                    FUTURE, "--ts", PAST,
+                ])
+                .expect(0);
+            for child in children {
+                scratch
+                    .run(&[
+                        "promise",
+                        "downstream",
+                        "--id",
+                        child,
+                        "--by",
+                        "b",
+                        "--to",
+                        "c",
+                        "--until",
+                        FUTURE,
+                        "--on",
+                        "A",
+                        "--ts",
+                        PAST,
+                    ])
+                    .expect(0);
+            }
+            for reason in ["first", "second"] {
+                scratch
+                    .run(&[
+                        "amend",
+                        "A",
+                        "--until",
+                        FUTURE,
+                        "--reason",
+                        reason,
+                        "--ts",
+                        "2020-01-02T00:00:00Z",
+                    ])
+                    .expect(0);
+            }
+            // Positive control: both amends were known to follow dependents.
+            let known = scratch.run(&["show", "A", "--json"]).json();
+            for index in [1, 2] {
+                assert_eq!(known["horizons"][index]["moved_after_dependents"], true);
+            }
+            scratch.rewrite(|_, event| {
+                if (kind == "promise" && event.get("id").and_then(|v| v.as_str()) == Some("bad"))
+                    || (kind == "amend"
+                        && event.get("reason").and_then(|v| v.as_str()) == Some("first"))
+                {
+                    event.insert("ts".into(), serde_json::json!("not-an-instant"));
+                }
+            });
+            let before = scratch.lines();
+            for args in [
+                vec!["show", "A", "--json"],
+                vec!["show", "A"],
+                vec!["show", "A", "--waiters"],
+                vec!["show", "A", "--waiters", "--json"],
+                vec!["ls", "--all"],
+                vec!["ls", "--all", "--tree"],
+                vec!["ls", "--all", "--json"],
+                vec!["ls", "--all", "--tree", "--json"],
+                vec!["export"],
+                vec!["export", "--format", "jsonl"],
+            ] {
+                let run = scratch.run(&args);
+                run.expect(0);
+                for child in children {
+                    assert!(run.stdout.contains(child), "{}", run.stdout);
+                }
+            }
+            let shown = scratch.run(&["show", "A", "--json"]).json();
+            assert_eq!(shown["id"], "A");
+            assert!(shown["horizons"][1].get("moved_after_dependents").is_none());
+            assert_eq!(
+                shown["horizons"][2].get("moved_after_dependents"),
+                (kind == "amend").then_some(&serde_json::Value::Bool(true))
+            );
+            let exported = scratch.run(&["export"]).json();
+            let rows = exported["promises"].as_array().unwrap();
+            assert_eq!(rows.len(), 3);
+            let root = rows.iter().find(|row| row["id"] == "A").unwrap();
+            assert!(root["amendments"][0]
+                .get("moved_after_dependents")
+                .is_none());
+            let jsonl = scratch.run(&["export", "--format", "jsonl"]);
+            let lines: Vec<serde_json::Value> = jsonl
+                .stdout
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(serde_json::json!(lines), exported["promises"]);
+            let human = scratch.run(&["show", "A"]);
+            assert_eq!(
+                human.stdout.matches("(moved after dependents)").count(),
+                usize::from(kind == "amend")
+            );
+            assert_eq!(scratch.lines(), before);
+        }
+    }
+}
+
+#[test]
+fn dependents_equal_instants_use_each_amends_log_position() {
+    for declared in [PAST, "2020-01-01T01:00:00+01:00"] {
+        let scratch = Scratch::new();
+        scratch
+            .run(&[
+                "promise", "upstream", "--id", "A", "--by", "a", "--to", "b", "--until", FUTURE,
+                "--ts", PAST,
+            ])
+            .expect(0);
+        scratch
+            .run(&["amend", "A", "--until", FUTURE, "--ts", PAST])
+            .expect(0);
+        scratch
+            .run(&[
+                "promise",
+                "downstream",
+                "--id",
+                "B",
+                "--by",
+                "b",
+                "--to",
+                "c",
+                "--on",
+                "A",
+                "--until",
+                FUTURE,
+                "--ts",
+                declared,
+            ])
+            .expect(0);
+        scratch
+            .run(&["amend", "A", "--until", FUTURE, "--ts", PAST])
+            .expect(0);
+        scratch.rewrite(|_, event| {
+            if event.get("id").and_then(|v| v.as_str()) == Some("B") {
+                event.insert("ts".into(), serde_json::json!(declared));
+            }
+        });
+        let shown = scratch.run(&["show", "A", "--json"]).json();
+        assert!(shown["horizons"][1].get("moved_after_dependents").is_none());
+        assert_eq!(shown["horizons"][2]["moved_after_dependents"], true);
+        let exported = scratch.run(&["export"]).json();
+        let root = exported["promises"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "A")
+            .unwrap();
+        assert!(root["amendments"][0]
+            .get("moved_after_dependents")
+            .is_none());
+        assert_eq!(root["amendments"][1]["moved_after_dependents"], true);
+    }
+}
+
+#[test]
+fn dependents_exclude_self_links_without_rejecting_declarations() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&[
+            "promise", "self", "--id", "S", "--on", "S", "--by", "a", "--to", "b", "--until",
+            FUTURE, "--ts", PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&["amend", "S", "--until", FUTURE, "--ts", PAST])
+        .expect(0);
+    let shown = scratch.run(&["show", "S", "--json"]).json();
+    assert_eq!(shown["on"], "S");
+    assert!(shown.get("dependents").is_none());
+    assert!(shown["horizons"][1].get("moved_after_dependents").is_none());
+    let human = scratch.run(&["show", "S"]);
+    human.expect(0);
+    assert!(!human.stdout.contains("dependents"));
+    let export = scratch.run(&["export"]).json();
+    assert!(export["promises"][0].get("dependents").is_none());
+    assert!(export["promises"][0]["amendments"][0]
+        .get("moved_after_dependents")
+        .is_none());
+    // An actual child still appears and marks a later amend.
+    scratch
+        .run(&[
+            "promise", "child", "--id", "C", "--on", "S", "--by", "b", "--to", "c", "--until",
+            FUTURE, "--ts", PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&["amend", "S", "--until", FUTURE, "--ts", PAST])
+        .expect(0);
+    let shown = scratch.run(&["show", "S", "--json"]).json();
+    assert_eq!(
+        shown["dependents"],
+        serde_json::json!([{"id":"C", "by":"b", "state":"conditional"}])
+    );
+    assert!(shown["horizons"][1].get("moved_after_dependents").is_none());
+    assert_eq!(shown["horizons"][2]["moved_after_dependents"], true);
+}
+
+#[test]
+fn on_time_unreadable_ls_all_exits_zero_and_keeps_every_row() {
+    for field in ["ts", "until"] {
+        let scratch = Scratch::new();
+        for id in ["unknown", "early", "late", "open"] {
+            scratch
+                .run(&[
+                    "promise",
+                    "ship",
+                    "--id",
+                    id,
+                    "--by",
+                    "a",
+                    "--to",
+                    "b",
+                    "--until",
+                    "2020-01-02T00:00:00Z",
+                    "--ts",
+                    PAST,
+                ])
+                .expect(0);
+            if id != "open" {
+                let at = if id == "late" {
+                    "2020-01-03T00:00:00Z"
+                } else {
+                    PAST
+                };
+                scratch
+                    .run(&[
+                        "resolve",
+                        id,
+                        "--satisfied",
+                        "--evidence",
+                        "done",
+                        "--ts",
+                        at,
+                    ])
+                    .expect(0);
+            }
+        }
+        scratch.rewrite(|_, event| {
+            if event.get("id").and_then(|id| id.as_str()) == Some("unknown") {
+                event.insert("on".into(), serde_json::json!("open"));
+            }
+            if (field == "ts" && event["type"] == "resolve" && event["promise"] == "unknown")
+                || (field == "until"
+                    && event.get("id").and_then(|id| id.as_str()) == Some("unknown"))
+            {
+                event.insert(field.into(), serde_json::json!("not-an-instant"));
+            }
+        });
+        let before = scratch.lines();
+        for args in [
+            vec!["ls", "--all"],
+            vec!["ls", "--all", "--tree"],
+            vec!["ls", "--all", "--json"],
+            vec!["ls", "--all", "--tree", "--json"],
+            vec!["export"],
+            vec!["export", "--format", "jsonl"],
+        ] {
+            let run = scratch.run(&args);
+            run.expect(0);
+            for id in ["unknown", "early", "late", "open"] {
+                assert!(run.stdout.contains(id), "{args:?}: {}", run.stdout);
+            }
+        }
+        for args in [
+            vec!["ls", "--state", "satisfied"],
+            vec!["ls", "--state", "satisfied", "--tree"],
+            vec!["ls", "--state", "satisfied", "--json"],
+            vec!["ls", "--state", "satisfied", "--tree", "--json"],
+            vec!["show", "open", "--waiters"],
+            vec!["show", "open", "--waiters", "--json"],
+        ] {
+            let run = scratch.run(&args);
+            run.expect(0);
+            assert!(run.stdout.contains("unknown"));
+        }
+        scratch.run(&["ls"]).expect(0);
+        scratch.run(&["ls", "--tree"]).expect(0);
+        let exported = scratch.run(&["export"]).json();
+        let summary = &exported["summary"];
+        assert_eq!(summary["satisfied_on_time"], 1);
+        assert_eq!(summary["satisfied_late"], 1);
+        assert_eq!(summary["satisfied_unknown"], 1);
+        assert_eq!(summary["states"]["satisfied"], 3);
+        let rows = exported["promises"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        let unknown = rows.iter().find(|row| row["id"] == "unknown").unwrap();
+        assert!(unknown.get("on_time").is_none());
+        assert_eq!(unknown["state"], "satisfied");
+        assert_eq!(scratch.lines(), before);
+    }
+}
+
+#[test]
+fn on_time_corrected_back_months_later_keeps_winning_resolve_instant() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&[
+            "promise",
+            "ship",
+            "--id",
+            "P",
+            "--by",
+            "a",
+            "--to",
+            "b",
+            "--until",
+            "2020-01-10T00:00:00Z",
+            "--ts",
+            PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "resolve",
+            "P",
+            "--satisfied",
+            "--evidence",
+            "done",
+            "--ts",
+            "2020-01-05T00:00:00Z",
+        ])
+        .expect(0);
+    assert_eq!(
+        scratch.run(&["show", "P", "--json"]).json()["on_time"],
+        true
+    );
+    scratch
+        .run(&[
+            "correct",
+            "P",
+            "--as",
+            "cancelled",
+            "--by",
+            "a",
+            "--reason",
+            "mislabelled",
+            "--ts",
+            "2020-02-01T00:00:00Z",
+        ])
+        .expect(0);
+    assert!(scratch
+        .run(&["show", "P", "--json"])
+        .json()
+        .get("on_time")
+        .is_none());
+    scratch
+        .run(&[
+            "correct",
+            "P",
+            "--as",
+            "satisfied",
+            "--by",
+            "a",
+            "--reason",
+            "original was right",
+            "--evidence",
+            "done",
+            "--ts",
+            "2020-04-01T00:00:00Z",
+        ])
+        .expect(0);
+    assert_eq!(
+        scratch.run(&["show", "P", "--json"]).json()["on_time"],
+        true
+    );
+    let export = scratch.run(&["export"]).json();
+    assert_eq!(export["promises"][0]["on_time"], true);
+    assert_eq!(
+        export["promises"][0]["resolution"]["at"],
+        "2020-01-05T00:00:00Z"
+    );
+    scratch.rewrite(|_, event| {
+        if event["type"] == "correct" {
+            event.insert("ts".into(), serde_json::json!("not-an-instant"));
+        }
+    });
+    assert_eq!(
+        scratch.run(&["show", "P", "--json"]).json()["on_time"],
+        true
+    );
+}

@@ -43,7 +43,7 @@ use crate::export;
 use crate::id;
 use crate::ledger;
 use crate::record::{Meta, Promise};
-use crate::state::{fold, Fold, GraphVisit, PromiseView, State};
+use crate::state::{fold, Fold, GraphVisit, Horizon, PromiseView, State};
 
 /// A command that did not succeed.
 ///
@@ -962,7 +962,7 @@ fn print_graph_rows(visits: &[GraphVisit<'_, '_>], folded: &Fold<'_>) {
         println!(
             "{indent}{}  {}  {}  {} -> {}  {}{missing}",
             view.id(),
-            view.state,
+            state_label(view),
             view.until(),
             view.record.by,
             view.record.to,
@@ -1025,7 +1025,8 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
     }
 
     let id_width = width(rows.iter().map(|view| view.id()));
-    let state_width = width(rows.iter().map(|view| view.state.as_str()));
+    let labels: Vec<String> = rows.iter().map(|view| state_label(view)).collect();
+    let state_width = width(labels.iter().map(String::as_str));
     let until_width = width(rows.iter().map(|view| view.until()));
     let parties: Vec<String> = rows
         .iter()
@@ -1033,11 +1034,11 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
         .collect();
     let party_width = width(parties.iter().map(String::as_str));
 
-    for (view, party) in rows.iter().zip(parties.iter()) {
+    for ((view, party), label) in rows.iter().zip(parties.iter()).zip(&labels) {
         println!(
             "{:<id_width$}  {:<state_width$}  {:<until_width$}  {:<party_width$}  {}",
             view.id(),
-            view.state.as_str(),
+            label,
             view.until(),
             party,
             ellipsize(&view.record.promise, 56),
@@ -1061,6 +1062,53 @@ fn print_empty_ls(folded: &Fold<'_>) {
 }
 
 // ---------------------------------------------------------------- show
+
+/// CLI-only additions. A2A retains its existing detail projection.
+#[derive(Serialize)]
+struct ShowDetail<'a> {
+    #[serde(flatten)]
+    detail: Detail<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_time: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dependents: Vec<Dependent<'a>>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct Dependent<'a> {
+    id: &'a str,
+    by: &'a str,
+    state: &'static str,
+}
+
+pub(crate) fn dependents<'a>(folded: &Fold<'a>, id: &str) -> Vec<Dependent<'a>> {
+    folded
+        .dependents(id)
+        .map(|view| Dependent {
+            id: view.id(),
+            by: &view.record.by,
+            state: view.state.as_str(),
+        })
+        .collect()
+}
+
+pub(crate) fn moved_after_dependents(
+    folded: &Fold<'_>,
+    id: &str,
+    horizon: &Horizon<'_>,
+) -> Option<bool> {
+    folded
+        .moved_after_dependents(id, horizon)
+        .filter(|moved| *moved)
+}
+
+fn state_label(view: &PromiseView<'_>) -> String {
+    match view.on_time() {
+        Some(true) => "satisfied (on time)".to_string(),
+        Some(false) => "satisfied (late)".to_string(),
+        None => view.state.to_string(),
+    }
+}
 
 /// `show --json`: the record, the computed state, every horizon, how it ended, and
 /// every judgment.
@@ -1093,6 +1141,8 @@ struct Detail<'a> {
 
 #[derive(Serialize)]
 struct HorizonJson<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moved_after_dependents: Option<bool>,
     ts: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<&'a str>,
@@ -1232,6 +1282,7 @@ fn detail<'a>(view: &'a PromiseView<'a>) -> Detail<'a> {
         .horizons
         .iter()
         .map(|horizon| HorizonJson {
+            moved_after_dependents: None,
             ts: horizon.ts,
             source: horizon.source,
             until: horizon.until,
@@ -1328,7 +1379,11 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         return Ok(());
     }
 
-    let detail = detail(view);
+    let mut detail = detail(view);
+    for (output, horizon) in detail.horizons.iter_mut().zip(&view.horizons).skip(1) {
+        output.moved_after_dependents = moved_after_dependents(&folded, view.id(), horizon);
+    }
+    let dependents = dependents(&folded, view.id());
     // The superseding line's own state, for the text block: "superseded by <ts>
     // (retracted)" says whether the observer corrected itself or withdrew.
     let superseding_state: Vec<Option<&str>> = view
@@ -1343,7 +1398,14 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         .collect();
 
     if args.json {
-        println!("{}", encode(&detail)?);
+        println!(
+            "{}",
+            encode(&ShowDetail {
+                detail,
+                on_time: view.on_time(),
+                dependents,
+            })?
+        );
         return Ok(());
     }
 
@@ -1355,7 +1417,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         ..
     } = detail;
 
-    println!("{}  {}", view.id(), view.state.as_str());
+    println!("{}  {}", view.id(), state_label(view));
     println!("  promise      {}", view.record.promise);
     println!("  by           {}", view.record.by);
     println!("  to           {}", view.record.to);
@@ -1375,6 +1437,16 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         println!("  meta         {}", one_line(meta));
     }
 
+    if !dependents.is_empty() {
+        println!("  dependents");
+        for dependent in &dependents {
+            println!(
+                "    {}  {}  {}",
+                dependent.id, dependent.by, dependent.state
+            );
+        }
+    }
+
     // Only printed when the deadline actually moved: an unamended promise has exactly
     // one horizon, and a list of one is noise. When it did move, every horizon is here
     // in order — §4: the deadline history stays auditable, which is the difference
@@ -1382,7 +1454,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
     if !view.amendments().is_empty() {
         println!("  horizons");
         for (index, horizon) in horizons.iter().enumerate() {
-            let note = if index == 0 {
+            let mut note = if index == 0 {
                 "  (declared)".to_string()
             } else {
                 horizon
@@ -1390,6 +1462,9 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
                     .map(|reason| format!("  {reason}"))
                     .unwrap_or_default()
             };
+            if horizon.moved_after_dependents == Some(true) {
+                note.push_str("  (moved after dependents)");
+            }
             println!(
                 "    {}  {}  {}{note}{}",
                 horizon.ts,
@@ -1593,8 +1668,8 @@ fn a2a_task(
         .iter()
         .map(|id| folded.get(id).ok_or_else(|| unknown_id(id, "a2a task")))
         .collect::<Result<_, _>>()?;
-    // `detail` is the same read model as `show --json`. Resolve every id
-    // before printing, so a missing id yields no partial metadata.
+    // `detail` is the shared base read model, without show/export-only facts.
+    // Resolve every id before printing, so a missing id yields no partial metadata.
     let details: Vec<_> = views.iter().map(|view| detail(view)).collect();
     let encoded = match address {
         Some((node, seat)) => {
