@@ -19,7 +19,7 @@ use std::str::FromStr;
 use jiff::Timestamp;
 
 use crate::event::{CorrectAs, Event, EventBody, Resolution};
-use crate::record::{Meta, Promise};
+use crate::record::{within_duration, Meta, Promise};
 
 /// A computed state. §3's first table, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,7 +28,9 @@ pub enum State {
     Conditional,
     /// Owed now. Either no `on`, or the antecedent is satisfied.
     Detached,
-    /// `detached`, unresolved, and `now > until`.
+    /// `detached`, unresolved, and `now > until` — or, for a promise with `within`
+    /// whose antecedent is satisfied, `now >` the earlier of `until` and the
+    /// antecedent's satisfaction plus `within`.
     Overdue,
     /// Resolved by the debtor, with evidence.
     Satisfied,
@@ -127,6 +129,11 @@ pub struct PromiseView<'a> {
     /// Every horizon this promise has had, in log order, declaration first. Never
     /// empty.
     pub horizons: Vec<Horizon<'a>>,
+    /// The horizon `overdue` is judged against, when `within` gives one: the earlier
+    /// of the current `until` and the antecedent's satisfaction instant plus
+    /// `within`. `None` until that antecedent is satisfied, for a promise with no
+    /// `within`, and when an instant or the duration cannot be read.
+    pub effective_until: Option<String>,
     /// The `resolve` event that ended it, if any. The **first** one in the log —
     /// see [`fold`] on why later ones are ignored rather than rejected.
     pub resolution: Option<&'a Event>,
@@ -176,8 +183,15 @@ impl<'a> PromiseView<'a> {
             return None;
         }
         let at = Timestamp::from_str(&self.resolution?.ts).ok()?;
-        let until = Timestamp::from_str(self.until()).ok()?;
+        let until = Timestamp::from_str(self.deadline()).ok()?;
         Some(at <= until)
+    }
+
+    /// The deadline this promise is **judged** against: [`PromiseView::effective_until`]
+    /// when `within` has produced one, otherwise the current [`PromiseView::until`].
+    /// `overdue`, `on_time` and the `lapsed` check all read this.
+    pub fn deadline(&self) -> &str {
+        self.effective_until.as_deref().unwrap_or(self.until())
     }
 
     /// The **current** horizon: the latest `amend`'s `until`, or the declared one if
@@ -507,6 +521,8 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
                     _ => State::Conditional,
                 },
                 horizons,
+                effective_until: antecedent_satisfied_at(record, &memo, &resolutions)
+                    .and_then(|at| effective_horizon(record, current_until(&current, record), at)),
                 resolution: resolutions.get(id).copied(),
                 corrections: corrections.get(id).cloned().unwrap_or_default(),
                 assessments: assessments.get(id).cloned().unwrap_or_default(),
@@ -527,6 +543,47 @@ pub fn fold<'a>(events: &'a [Event], now: Timestamp) -> Fold<'a> {
         views,
         children,
     }
+}
+
+/// The current horizon of `record`: its latest amend, or its declaration.
+fn current_until<'a>(current: &HashMap<&'a str, &'a str>, record: &'a Promise) -> &'a str {
+    current
+        .get(record.id.as_str())
+        .copied()
+        .unwrap_or(record.until.as_str())
+}
+
+/// When the antecedent of `record` was satisfied — the `ts` of its winning resolve
+/// event, the same instant `on_time` reads — or `None` if there is no antecedent or it
+/// is not satisfied. A promise that waits on itself has no such instant.
+fn antecedent_satisfied_at<'a>(
+    record: &Promise,
+    memo: &HashMap<&'a str, Memo>,
+    resolutions: &HashMap<&'a str, &'a Event>,
+) -> Option<&'a str> {
+    let on = record.on.as_deref().filter(|on| *on != record.id)?;
+    match memo.get(on) {
+        Some(Memo::Done(State::Satisfied)) => resolutions.get(on).map(|event| event.ts.as_str()),
+        _ => None,
+    }
+}
+
+/// DESIGN.md §1's `within`: once the antecedent was satisfied at `satisfied_at`, the
+/// horizon is the earlier of the current `until` (the outer bound) and
+/// `satisfied_at + within`. `None` without a `within`, or when `until`, the instant or
+/// the duration cannot be read — the caller then falls back to plain `until`.
+fn effective_horizon(record: &Promise, until: &str, satisfied_at: &str) -> Option<String> {
+    let within = within_duration(record.within.as_deref()?).ok()?;
+    let outer = Timestamp::from_str(until).ok()?;
+    let satisfied = Timestamp::from_str(satisfied_at).ok()?;
+    // Whole seconds, like every other instant pinki writes.
+    let satisfied = Timestamp::from_second(satisfied.as_second()).ok()?;
+    let relative = satisfied.checked_add(within).ok()?;
+    Some(if relative < outer {
+        relative.to_string()
+    } else {
+        until.to_string()
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -603,7 +660,7 @@ impl<'a> Solver<'a, '_> {
 
             // Rule 3: no antecedent means born owed.
             let Some(antecedent) = record.on.as_deref() else {
-                let state = self.owed_state(record);
+                let state = self.owed_state(record, None);
                 self.memo.insert(current, Memo::Done(state));
                 stack.pop();
                 continue;
@@ -637,7 +694,12 @@ impl<'a> Solver<'a, '_> {
                     let state = match antecedent_state {
                         // Detached: the antecedent satisfied, so this is owed now —
                         // and only now can it be late (rule 4).
-                        State::Satisfied => self.owed_state(record),
+                        State::Satisfied => self.owed_state(
+                            record,
+                            self.resolutions
+                                .get(antecedent)
+                                .map(|event| event.ts.as_str()),
+                        ),
                         // The antecedent ended without satisfying, so this never
                         // became owed. Note this propagates: a promise on an expired
                         // antecedent is itself expired, transitively down the chain.
@@ -675,13 +737,14 @@ impl<'a> Solver<'a, '_> {
     ///   horizon its latest `amend` set, never the one it was born with — otherwise an
     ///   observer scores it overdue before the fleet that owns it does, which is the
     ///   divergence §4's `amend` exists to close.
-    fn owed_state(&self, record: &Promise) -> State {
-        let until = self
-            .current
-            .get(record.id.as_str())
-            .copied()
-            .unwrap_or(record.until.as_str());
-        match Timestamp::from_str(until) {
+    /// - **A relative horizon replaces the deadline once it is known.** With `within`
+    ///   and an antecedent satisfied at `satisfied_at`, the deadline is the earlier of
+    ///   `until` and `satisfied_at + within` ([`effective_horizon`]). Before the
+    ///   antecedent is satisfied this is never reached, so the promise is never late.
+    fn owed_state(&self, record: &Promise, satisfied_at: Option<&str>) -> State {
+        let until = current_until(self.current, record);
+        let effective = satisfied_at.and_then(|at| effective_horizon(record, until, at));
+        match Timestamp::from_str(effective.as_deref().unwrap_or(until)) {
             Ok(until) if self.now > until => State::Overdue,
             Ok(_) => State::Detached,
             // An `until` this build cannot parse can only arrive from a hand-edited
@@ -719,6 +782,7 @@ mod tests {
                 to: "…/creditor".into(),
                 on: on.map(str::to_string),
                 until: until.into(),
+                within: None,
                 task: None,
                 meta: None,
             }),
@@ -1570,5 +1634,183 @@ mod tests {
         let folded = fold(&log, ts("2026-09-04T00:00:00Z"));
         assert_eq!(folded.state("pnk_4f3a91"), Some(State::Released));
         assert_eq!(folded.state("pnk_88de10"), Some(State::Expired));
+    }
+    // ---- `within`: a horizon relative to the antecedent (§1) ---------------
+
+    /// A dependent on `on` that carries `within`, a stored ISO-8601 duration.
+    fn dependent_within(id: &str, on: &str, until: &str, within: &str) -> Event {
+        let mut event = promise(id, Some(on), until);
+        if let EventBody::Promise(record) = &mut event.body {
+            record.within = Some(within.into());
+        }
+        event
+    }
+
+    /// `pnk_x` is satisfied at 2026-08-29T00:00:00Z (the helper's instant), so
+    /// `PT24H` puts the relative horizon at 2026-08-30T00:00:00Z.
+    const RELATIVE: &str = "2026-08-30T00:00:00Z";
+    const AFTER_RELATIVE: &str = "2026-08-30T00:00:01Z";
+
+    #[test]
+    fn within_dependent_is_never_overdue_while_the_antecedent_is_open() {
+        let log = [
+            promise("pnk_x", None, "2099-01-01T00:00:00Z"),
+            dependent_within("pnk_y", "pnk_x", UNTIL, "PT24H"),
+        ];
+        // Far past its `until`, and still conditional — exactly a dependent without
+        // `within`. No relative horizon exists yet.
+        assert_eq!(
+            state_of(&log, "2030-01-01T00:00:00Z", "pnk_y"),
+            State::Conditional
+        );
+        let folded = fold(&log, ts("2030-01-01T00:00:00Z"));
+        assert_eq!(folded.get("pnk_y").unwrap().effective_until, None);
+    }
+
+    #[test]
+    fn within_horizon_is_antecedent_satisfaction_plus_within_when_earlier_than_until() {
+        let log = [
+            promise("pnk_x", None, UNTIL),
+            dependent_within("pnk_y", "pnk_x", UNTIL, "PT24H"),
+            satisfied("pnk_x"),
+        ];
+        assert_eq!(state_of(&log, RELATIVE, "pnk_y"), State::Detached);
+        assert_eq!(state_of(&log, AFTER_RELATIVE, "pnk_y"), State::Overdue);
+        let folded = fold(&log, ts(RELATIVE));
+        let view = folded.get("pnk_y").unwrap();
+        assert_eq!(view.effective_until.as_deref(), Some(RELATIVE));
+        assert_eq!(view.deadline(), RELATIVE);
+        // The outer bound is untouched.
+        assert_eq!(view.until(), UNTIL);
+    }
+
+    #[test]
+    fn within_horizon_is_until_when_until_is_earlier() {
+        let early = "2026-08-29T12:00:00Z";
+        let log = [
+            promise("pnk_x", None, UNTIL),
+            dependent_within("pnk_y", "pnk_x", early, "P2D"),
+            satisfied("pnk_x"),
+        ];
+        assert_eq!(state_of(&log, early, "pnk_y"), State::Detached);
+        assert_eq!(
+            state_of(&log, "2026-08-29T12:00:01Z", "pnk_y"),
+            State::Overdue
+        );
+        let folded = fold(&log, ts(early));
+        assert_eq!(
+            folded.get("pnk_y").unwrap().effective_until.as_deref(),
+            Some(early)
+        );
+    }
+
+    #[test]
+    fn an_amend_moves_the_outer_bound_and_within_stays() {
+        let log = [
+            promise("pnk_x", None, UNTIL),
+            dependent_within("pnk_y", "pnk_x", UNTIL, "PT24H"),
+            satisfied("pnk_x"),
+            amended("pnk_y", "2026-08-29T01:00:00Z", "2026-08-29T06:00:00Z"),
+        ];
+        // The amended bound is now the earlier one.
+        let folded = fold(&log, ts(RELATIVE));
+        let view = folded.get("pnk_y").unwrap();
+        assert_eq!(
+            view.effective_until.as_deref(),
+            Some("2026-08-29T06:00:00Z")
+        );
+        assert_eq!(view.state, State::Overdue);
+        assert_eq!(view.record.within.as_deref(), Some("PT24H"));
+    }
+
+    #[test]
+    fn within_dependent_expires_when_the_antecedent_ends_unsatisfied() {
+        for end in [cancelled("pnk_x"), released("pnk_x")] {
+            let log = [
+                promise("pnk_x", None, UNTIL),
+                dependent_within("pnk_y", "pnk_x", UNTIL, "PT24H"),
+                end,
+            ];
+            let folded = fold(&log, ts(AFTER));
+            let view = folded.get("pnk_y").unwrap();
+            assert_eq!(view.state, State::Expired);
+            assert_eq!(view.effective_until, None);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_within_leaves_the_plain_until_in_force() {
+        // A hand-written ledger: the fold must not fail, and falls back to `until`.
+        for bad in ["bogus", "P1M", "PT0S", "-PT1H", ""] {
+            let log = [
+                promise("pnk_x", None, UNTIL),
+                dependent_within("pnk_y", "pnk_x", UNTIL, bad),
+                satisfied("pnk_x"),
+            ];
+            let folded = fold(&log, ts(AFTER_RELATIVE));
+            let view = folded.get("pnk_y").unwrap();
+            assert_eq!(view.state, State::Detached, "{bad:?}");
+            assert_eq!(view.effective_until, None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn within_without_an_antecedent_is_ignored_by_the_fold() {
+        let mut event = promise("pnk_a", None, UNTIL);
+        if let EventBody::Promise(record) = &mut event.body {
+            record.within = Some("PT1H".into());
+        }
+        let log = [event];
+        assert_eq!(state_of(&log, BEFORE, "pnk_a"), State::Detached);
+        let folded = fold(&log, ts(BEFORE));
+        assert_eq!(folded.get("pnk_a").unwrap().effective_until, None);
+    }
+
+    #[test]
+    fn within_on_itself_has_no_relative_horizon() {
+        let log = [dependent_within("pnk_a", "pnk_a", UNTIL, "PT1H")];
+        let folded = fold(&log, ts(AFTER));
+        let view = folded.get("pnk_a").unwrap();
+        assert_eq!(view.state, State::Conditional);
+        assert_eq!(view.effective_until, None);
+    }
+
+    #[test]
+    fn a_satisfied_promise_on_itself_has_no_relative_horizon() {
+        let log = [
+            dependent_within("pnk_a", "pnk_a", UNTIL, "PT1H"),
+            satisfied("pnk_a"),
+        ];
+        let folded = fold(&log, ts(AFTER));
+        let view = folded.get("pnk_a").unwrap();
+        assert_eq!(view.state, State::Satisfied);
+        assert_eq!(view.effective_until, None);
+    }
+
+    #[test]
+    fn satisfaction_is_judged_against_the_relative_horizon() {
+        // Y is satisfied after X + 24h but before `until`: late, though it would
+        // have been on time without `within`.
+        let mut late = Event::new(
+            "2026-08-30T12:00:00Z",
+            EventBody::satisfied("pnk_y", "…/debtor", vec!["https://example.org/y".into()]),
+        );
+        let log = [
+            promise("pnk_x", None, UNTIL),
+            dependent_within("pnk_y", "pnk_x", UNTIL, "PT24H"),
+            satisfied("pnk_x"),
+            late.clone(),
+        ];
+        let folded = fold(&log, ts(AFTER));
+        assert_eq!(folded.get("pnk_y").unwrap().on_time(), Some(false));
+        late.ts = "2026-08-29T23:00:00Z".into();
+        let log = [
+            promise("pnk_x", None, UNTIL),
+            dependent_within("pnk_y", "pnk_x", UNTIL, "PT24H"),
+            satisfied("pnk_x"),
+            late,
+        ];
+        let folded = fold(&log, ts(AFTER));
+        assert_eq!(folded.get("pnk_y").unwrap().on_time(), Some(true));
     }
 }

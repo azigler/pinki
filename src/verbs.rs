@@ -42,7 +42,7 @@ use crate::event::{CorrectAs, Event, EventBody, Resolution, RETRACTED, VIOLATED}
 use crate::export;
 use crate::id;
 use crate::ledger;
-use crate::record::{Meta, Promise};
+use crate::record::{within_duration, Meta, Promise};
 use crate::state::{fold, Fold, GraphVisit, Horizon, PromiseView, State};
 
 /// A command that did not succeed.
@@ -131,6 +131,8 @@ struct Incoming {
     on: Option<String>,
     until: String,
     #[serde(default)]
+    within: Option<String>,
+    #[serde(default)]
     task: Option<String>,
     /// Taken as an untyped value rather than a [`Meta`] so that "meta is not an
     /// object" is refused in pinki's own words, citing §1, exactly as the `--meta`
@@ -152,6 +154,7 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
             to: required_flag(args.to, "--to")?,
             on: args.on,
             until: required_flag(args.until, "--until")?,
+            within: args.within,
             task: args.task,
             meta: match &args.meta {
                 Some(json) => Some(parse_meta(json)?),
@@ -167,6 +170,14 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
                     "--meta and a record on stdin are two ways to say the same thing, and pinki \
                      will not guess which one you meant: put `meta` inside the record you are \
                      piping in (§1). Nothing was appended"
+                        .into(),
+                ));
+            }
+            if args.within.is_some() {
+                return Err(Fail::Usage(
+                    "--within and a record on stdin are two ways to say the same thing, and \
+                     pinki will not guess which one you meant: put `within` inside the record \
+                     you are piping in (§1). Nothing was appended"
                         .into(),
                 ));
             }
@@ -189,6 +200,22 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
     let by = non_blank(&incoming.by, "`by`")?;
     let to = non_blank(&incoming.to, "`to`")?;
     let until = parse_until(&incoming.until)?;
+    // `within` is checked before the ledger is consulted, like `--until`: a horizon
+    // pinki cannot read is malformed whether or not the antecedent exists. It means
+    // "after `on` is satisfied", so without `on` it has nothing to run from.
+    let within = match &incoming.within {
+        Some(raw) => {
+            if incoming.on.is_none() {
+                return Err(Fail::Usage(
+                    "--within runs from the moment the antecedent is satisfied, so it needs \
+                     --on ID (§1). Nothing was appended"
+                        .into(),
+                ));
+            }
+            Some(parse_within(raw)?)
+        }
+        None => None,
+    };
     let meta = match &incoming.meta {
         Some(value) => Some(check_meta(value)?),
         None => None,
@@ -265,6 +292,7 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
         to,
         on,
         until,
+        within,
         task: match incoming.task {
             Some(task) => Some(non_blank(&task, "`task`")?),
             None => None,
@@ -308,7 +336,7 @@ fn read_incoming_from_stdin() -> Result<Incoming, Fail> {
         Fail::Usage(format!(
             "the record on stdin is not a promise: {e}\n\
              expected an object with `promise`, `by`, `to`, `until`, and optionally `id`, `on`, \
-             `task`, `meta`, `ts` — no other keys"
+             `within`, `task`, `meta`, `ts` — no other keys"
         ))
     })
 }
@@ -490,17 +518,17 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
             )));
         }
         if matches!(outcome, Outcome::Lapsed(_)) {
-            let until = Timestamp::from_str(view.until()).map_err(|e| {
+            let until = Timestamp::from_str(view.deadline()).map_err(|e| {
                 Fail::Op(format!(
                     "cannot lapse `{}`: current horizon `{}` cannot be evaluated as an instant ({e}). Nothing was appended",
                     args.id,
-                    view.until()
+                    view.deadline()
                 ))
             })?;
             if now <= until {
                 return Err(Fail::Op(format!(
                     "`{}` may not lapse before its current horizon {} (§4): the clock has not run out. Nothing was appended",
-                    args.id, view.until()
+                    args.id, view.deadline()
                 )));
             }
         }
@@ -1119,6 +1147,11 @@ fn print_empty_ls(folded: &Fold<'_>) {
 struct ShowDetail<'a> {
     #[serde(flatten)]
     detail: Detail<'a>,
+    /// The horizon `state` is judged against once `within` has produced one: the earlier
+    /// of `until` and the antecedent's satisfaction plus `within`. Absent before the
+    /// antecedent is satisfied, and absent for a promise with no `within`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_until: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     on_time: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1453,6 +1486,7 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
             "{}",
             encode(&ShowDetail {
                 detail,
+                effective_until: view.effective_until.as_deref(),
                 on_time: view.on_time(),
                 dependents,
             })?
@@ -1476,6 +1510,12 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         println!("  on           {on}");
     }
     println!("  until        {}", view.until());
+    if let Some(within) = &view.record.within {
+        println!("  within       {within} after the antecedent is satisfied");
+        if let Some(effective) = &view.effective_until {
+            println!("  effective    {effective}");
+        }
+    }
     if view.horizons[0].source == Some("supplied") {
         println!("  declared     {} (supplied)", view.horizons[0].ts);
     }
@@ -1894,6 +1934,37 @@ fn parse_until(until: &str) -> Result<String, Fail> {
         })
 }
 
+/// Parse `--within` and return the ISO-8601 duration to store.
+///
+/// `<int>m`, `<int>h` and `<int>d` are the short forms; an ISO-8601 duration (`PT24H`,
+/// `P2D`) is accepted as written, upper-cased. Zero, negative and anything with
+/// years or months are usage errors — see [`within_duration`].
+fn parse_within(raw: &str) -> Result<String, Fail> {
+    let trimmed = raw.trim();
+    let usage = |why: String| {
+        Fail::Usage(format!(
+            "--within {why}\n\
+             give a positive length as `45m`, `24h`, `2d` or an ISO-8601 duration like `PT24H`. \
+             Nothing was appended"
+        ))
+    };
+    let iso = match trimmed.char_indices().last() {
+        Some((at, unit @ ('m' | 'h' | 'd' | 'M' | 'H' | 'D')))
+            if at > 0 && trimmed[..at].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            let count = &trimmed[..at];
+            match unit.to_ascii_lowercase() {
+                'm' => format!("PT{count}M"),
+                'h' => format!("PT{count}H"),
+                _ => format!("P{count}D"),
+            }
+        }
+        _ => trimmed.to_ascii_uppercase(),
+    };
+    within_duration(&iso).map_err(|why| usage(format!("`{trimmed}`: {why}")))?;
+    Ok(iso)
+}
+
 /// The cap on one `meta` object, in bytes of its compact JSON form.
 ///
 /// Generous on purpose — provenance is a handful of short keys, and 8 KiB is two
@@ -2035,6 +2106,42 @@ mod tests {
     fn exit_codes_split_malformed_from_operational() {
         assert_eq!(Fail::Usage("x".into()).code(), 2);
         assert_eq!(Fail::Op("x".into()).code(), 1);
+    }
+
+    #[test]
+    fn within_short_forms_are_stored_as_iso_durations() {
+        for (given, stored) in [
+            ("24h", "PT24H"),
+            ("45m", "PT45M"),
+            ("2d", "P2D"),
+            (" 24H ", "PT24H"),
+            ("pt24h", "PT24H"),
+            ("PT90M", "PT90M"),
+            ("P2D", "P2D"),
+        ] {
+            assert_eq!(parse_within(given).unwrap(), stored, "{given:?}");
+        }
+    }
+
+    #[test]
+    fn within_zero_negative_and_unknown_units_are_usage_errors() {
+        for bad in [
+            "0h",
+            "0m",
+            "0d",
+            "-1h",
+            "3x",
+            "h",
+            "",
+            "24",
+            "1.5h",
+            "P1M",
+            "99999999999999999999d",
+        ] {
+            let err = parse_within(bad).unwrap_err();
+            assert!(matches!(err, Fail::Usage(_)), "{bad:?}");
+            assert!(err.to_string().contains("--within"), "{bad:?}: {err}");
+        }
     }
 
     #[test]

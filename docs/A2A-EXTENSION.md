@@ -253,6 +253,13 @@ uses the same names and values as `show --json`. At most one promise per Task
 rides under v0. After an `amend`, the declaration's `until` here is
 the current horizon.
 
+A dependent record may carry `within`, an ISO-8601 duration that runs from the moment
+its antecedent is satisfied ([DESIGN.md § 1](DESIGN.md#within-is-a-horizon-relative-to-the-antecedent)).
+Then `until` is the outer bound, and the horizon a reader judges `overdue` against is
+the earlier of `until` and that moment plus `within`. A reader that ignores `within`
+reads `until`. The blocks carry the record only; the computed horizon is in
+`pinki export` as `effective_until`.
+
 The record may also carry `meta`: an optional, opaque object that the declaring
 system uses for its own provenance
 ([DESIGN.md § 1](DESIGN.md#1-the-record)). It rides the metadata block along with

@@ -13,6 +13,19 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- `pinki promise --on ID --within DURATION` gives a dependent promise a horizon
+  relative to its antecedent. `DURATION` is `<int>m`, `<int>h`, `<int>d` or an
+  ISO-8601 duration; the record stores the ISO form (`"within":"PT24H"`) after
+  `until`, and the key is absent when not given. `--until` stays required as the
+  outer bound. The promise is `conditional`, never overdue, until the antecedent
+  is satisfied at `t`; then `overdue`, `on_time` and `lapsed` read against
+  `min(until, t + within)`. `show` (text and `--json`) and `export` add the
+  computed `effective_until` once it is known. `within` without `on`, and a zero,
+  negative or unknown-unit duration, exit 2 without appending. `amend` moves
+  `until` only. Ledgers without `within` read byte-for-byte as before, and 0.6.0
+  reads a ledger that holds `within`, seeing only the outer bound. A minor bump
+  at the next release.
+
 - `amend` asks whether a promise is still wanted from its third move and warns
   when `--reason` is absent. Both stderr lines start with `pinki: warning:` and
   print only after the append succeeds. `PINKI_AMEND_ASK_AT` sets the threshold
