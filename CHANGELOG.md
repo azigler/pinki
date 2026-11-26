@@ -13,6 +13,14 @@ tools can depend on them, not merely read them.
 
 ### Added
 
+- `amend` asks whether a promise is still wanted from its third move and warns
+  when `--reason` is absent. Both stderr lines start with `pinki: warning:` and
+  print only after the append succeeds. `PINKI_AMEND_ASK_AT` sets the threshold
+  (unset or empty means `3`; `0` disables it; otherwise ASCII digits fitting
+  `u64`, with leading zeros allowed and no signs or whitespace), and `--automated`
+  skips the lines for one call. Every amend counts, without reading `meta` or
+  changing ledger data, the fold, or stdout.
+
 - `show` and both export formats list direct `dependents`, including resolved
   promises, with id, debtor and state, excluding self-links. Horizon moves after
   a dependent's declaration carry `moved_after_dependents: true`; equal instants

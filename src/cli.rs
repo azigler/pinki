@@ -109,6 +109,14 @@ pub struct AmendArgs {
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
 
+    /// An escalation ladder or watchdog moving a horizon on a clock: skip the
+    /// still-wanted and reason warnings for this call only. PINKI_AMEND_ASK_AT sets
+    /// the first move that warns (unset or empty: 3; 0: disabled). Non-empty values
+    /// must be ASCII digits fitting u64; leading zeros are allowed, signs and
+    /// whitespace are not.
+    #[arg(long)]
+    pub automated: bool,
+
     /// Who is moving it. Defaults to the debtor, and §8.2 admits nobody else — an
     /// observer's view of a deadline is an `assess`, not an amend.
     #[arg(long, value_name = "WHO")]
