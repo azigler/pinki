@@ -110,7 +110,10 @@ pub struct AmendArgs {
     pub reason: Option<String>,
 
     /// An escalation ladder or watchdog moving a horizon on a clock: skip the
-    /// still-wanted and reason warnings for this call only.
+    /// still-wanted and reason warnings for this call only. PINKI_AMEND_ASK_AT sets
+    /// the first move that warns (unset or empty: 3; 0: disabled). Non-empty values
+    /// must be ASCII digits fitting u64; leading zeros are allowed, signs and
+    /// whitespace are not.
     #[arg(long)]
     pub automated: bool,
 

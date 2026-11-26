@@ -14,8 +14,10 @@ tools can depend on them, not merely read them.
 ### Added
 
 - `amend` asks whether a promise is still wanted from its third move and warns
-  when `--reason` is absent. Both lines go to stderr; the amend still succeeds.
-  `PINKI_AMEND_ASK_AT` sets the threshold (`0` disables it), and `--automated`
+  when `--reason` is absent. Both stderr lines start with `pinki: warning:` and
+  print only after the append succeeds. `PINKI_AMEND_ASK_AT` sets the threshold
+  (unset or empty means `3`; `0` disables it; otherwise ASCII digits fitting
+  `u64`, with leading zeros allowed and no signs or whitespace), and `--automated`
   skips the lines for one call. Every amend counts, without reading `meta` or
   changing ledger data, the fold, or stdout.
 

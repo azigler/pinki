@@ -438,8 +438,9 @@ whose clock can be trusted to sort them.
 
 **The third move asks a question.** From the third amend of an id, the CLI prints
 one named stderr line asking whether the promise is still wanted. Without
-`--reason TEXT`, it prints a second line asking for a reason. It still appends,
-returns success, and prints the same stdout report. This starts as a warning:
+`--reason TEXT`, it prints a second line asking for a reason. Both start with
+`pinki: warning:` and print only after the append succeeds. It returns success
+and prints the same stdout report. This starts as a warning:
 making a new check refuse a write needs a later decision.
 
 A weekly audit found 163 chronically extended promises, with slips up to 526 hours.
@@ -451,9 +452,10 @@ of that id**, including automation: §8.2 treats each as the debtor's act, and �
 keep `meta` opaque with no interpretation anywhere. The fold and read output do
 not change. `--automated` skips both lines for this call only, for an escalation
 ladder or watchdog moving a horizon on a clock; it writes no extra ledger data.
-`PINKI_AMEND_ASK_AT` sets the first move that asks (default `3`; `0` disables both
-lines). A value that cannot parse as a non-negative integer is a usage error
-(exit 2, nothing appended), even with `--automated`.
+`PINKI_AMEND_ASK_AT` sets the first move that asks (`0` disables both lines; unset
+or empty means `3`). Non-empty values must contain only ASCII digits and fit in
+`u64`. Leading zeros are allowed; signs and whitespace are not. Invalid values
+are usage errors (exit 2, nothing appended), even with `--automated` or an unknown id.
 
 **`resolve`** — ends one. Five outcomes:
 
@@ -690,8 +692,10 @@ promises exports the same bytes as before.
 explicit one that disagrees. `--reason` is encouraged, not required. From the third
 move, stderr asks whether the work is still wanted and warns if a reason is absent;
 the write still succeeds. `--automated` skips both lines for one clock-driven move.
-`PINKI_AMEND_ASK_AT` changes the threshold (default `3`, `0` disables it; invalid
-values are usage errors). Provenance stays in opaque `--meta`, never in the count.
+`PINKI_AMEND_ASK_AT` changes the threshold (unset or empty means `3`; `0` disables
+it). Non-empty values must be ASCII digits that fit in `u64`; leading zeros are
+allowed, signs and whitespace are not. Invalid values are usage errors. Provenance
+stays in opaque `--meta`, never in the count.
 
 `promise` mints an id unless `--id` gives it one, and an id you give it is opaque —
 § 1's id policy, enforced where the input arrives. Every other verb takes whatever id

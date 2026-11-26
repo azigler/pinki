@@ -972,7 +972,7 @@ fn amend_third_move_with_reason_warns_once_and_keeps_stdout_and_append() {
     let id = twice_amended(&scratch);
     let run = scratch.run(&["amend", &id, "--until", FUTURE, "--reason", "still needed"]);
     run.expect(0);
-    assert_eq!(run.stderr, format!("pinki: third move of {id}: is this still wanted? resolve, release or cancel it if not.\n"));
+    assert_eq!(run.stderr, format!("pinki: warning: third move of {id}: is this still wanted? resolve, release or cancel it if not.\n"));
     // report()'s pre-feature contract is exactly id, tab, computed state, newline.
     assert_eq!(run.stdout, format!("{id}\tdetached\n"));
     assert!(!run.stdout.contains("still wanted"));
@@ -990,7 +990,7 @@ fn amend_third_move_without_reason_warns_twice_but_still_appends() {
     let id = twice_amended(&scratch);
     let run = scratch.run(&["amend", &id, "--until", FUTURE]);
     run.expect(0);
-    assert_eq!(run.stderr, format!("pinki: third move of {id}: is this still wanted? resolve, release or cancel it if not.\npinki: a reason is expected from move 3 on (--reason TEXT).\n"));
+    assert_eq!(run.stderr, format!("pinki: warning: third move of {id}: is this still wanted? resolve, release or cancel it if not.\npinki: warning: a reason is expected from move 3 on (--reason TEXT).\n"));
     assert_eq!(run.stdout, format!("{id}\tdetached\n"));
     assert_eq!(scratch.lines().len(), 4);
     assert_eq!(scratch.events()[3]["until"], FUTURE);
@@ -1030,7 +1030,7 @@ fn amend_automated_third_move_is_counted_by_the_later_hand_fourth_move() {
     });
     let fourth = scratch.run(&["amend", &id, "--until", FUTURE]);
     fourth.expect(0);
-    assert_eq!(fourth.stderr, format!("pinki: fourth move of {id}: is this still wanted? resolve, release or cancel it if not.\npinki: a reason is expected from move 3 on (--reason TEXT).\n"));
+    assert_eq!(fourth.stderr, format!("pinki: warning: fourth move of {id}: is this still wanted? resolve, release or cancel it if not.\npinki: warning: a reason is expected from move 3 on (--reason TEXT).\n"));
     assert_eq!(scratch.lines().len(), 5);
 }
 
@@ -1073,8 +1073,11 @@ fn amend_invalid_threshold_is_usage_error_and_appends_nothing_even_if_automated(
     for value in [
         "abc",
         "-1",
-        "",
+        "+3",
         "1.5",
+        "3 ",
+        "１",
+        "18446744073709551616",
         " 2",
         "999999999999999999999999999999999",
     ] {
@@ -1085,11 +1088,92 @@ fn amend_invalid_threshold_is_usage_error_and_appends_nothing_even_if_automated(
             run.expect(2);
             assert!(run
                 .stderr
-                .contains("PINKI_AMEND_ASK_AT must be a non-negative integer"));
+                .contains("PINKI_AMEND_ASK_AT must contain only ASCII digits fitting u64"));
             assert_no_amend_advice(&run);
             assert_eq!(scratch.lines().len(), 3);
             assert_eq!(fs::read(scratch.ledger()).unwrap(), before);
         }
+    }
+}
+
+#[test]
+fn amend_empty_threshold_defaults_to_three_and_leading_zero_is_three() {
+    for value in ["", "03"] {
+        let scratch = Scratch::new();
+        let id = scratch.promise("report", "debtor", "creditor", PAST);
+        for number in 1..=3 {
+            let run = scratch.run_with_ask_at(&["amend", &id, "--until", FUTURE], value.as_ref());
+            run.expect(0);
+            if number < 3 {
+                assert_no_amend_advice(&run);
+            } else {
+                assert!(run
+                    .stderr
+                    .contains(&format!("pinki: warning: third move of {id}")));
+                assert!(run
+                    .stderr
+                    .contains("pinki: warning: a reason is expected from move 3 on"));
+            }
+        }
+    }
+}
+
+#[test]
+fn amend_threshold_one_names_first_and_later_fifth_and_tenth_moves() {
+    let scratch = Scratch::new();
+    let id = scratch.promise("report", "debtor", "creditor", PAST);
+    for number in 1..=10 {
+        let run = scratch.run_with_ask_at(&["amend", &id, "--until", FUTURE], "1".as_ref());
+        run.expect(0);
+        if let Some(name) = match number {
+            1 => Some("first"),
+            5 => Some("fifth"),
+            10 => Some("tenth"),
+            _ => None,
+        } {
+            assert!(
+                run.stderr
+                    .contains(&format!("pinki: warning: {name} move of {id}:")),
+                "{}",
+                run.stderr
+            );
+        }
+    }
+}
+
+#[test]
+fn amend_max_u64_threshold_is_valid_and_bad_threshold_beats_unknown_id() {
+    let scratch = Scratch::new();
+    let id = twice_amended(&scratch);
+    let run = scratch.run_with_ask_at(
+        &["amend", &id, "--until", FUTURE],
+        "18446744073709551615".as_ref(),
+    );
+    run.expect(0);
+    assert_no_amend_advice(&run);
+    let before = fs::read(scratch.ledger()).unwrap();
+    let unknown = scratch.run_with_ask_at(&["amend", "unknown", "--until", FUTURE], "bad".as_ref());
+    unknown.expect(2);
+    assert!(unknown
+        .stderr
+        .contains("PINKI_AMEND_ASK_AT must contain only ASCII digits fitting u64"));
+    assert_eq!(fs::read(scratch.ledger()).unwrap(), before);
+}
+
+#[test]
+fn amend_help_names_threshold_and_accepted_form() {
+    let scratch = Scratch::new();
+    let help = scratch.run(&["amend", "--help"]);
+    help.expect(0);
+    for text in [
+        "PINKI_AMEND_ASK_AT",
+        "unset or empty: 3",
+        "ASCII digits fitting u64",
+        "leading zeros",
+        "signs",
+        "whitespace",
+    ] {
+        assert!(help.stdout.contains(text), "{}", help.stdout);
     }
 }
 
@@ -1118,6 +1202,12 @@ fn amend_refused_third_move_has_no_advice_for_wrong_debtor_or_resolved_promise()
     assert!(wrong.stderr.contains("may not amend"));
     assert_no_amend_advice(&wrong);
     assert_eq!(scratch.lines().len(), 3);
+    let third = scratch.run(&["amend", &id, "--until", FUTURE]);
+    third.expect(0);
+    assert!(third
+        .stderr
+        .contains(&format!("pinki: warning: third move of {id}:")));
+    assert_eq!(scratch.lines().len(), 4);
     scratch
         .run(&["resolve", &id, "--cancelled", "--reason", "not needed"])
         .expect(0);
@@ -1125,42 +1215,118 @@ fn amend_refused_third_move_has_no_advice_for_wrong_debtor_or_resolved_promise()
     resolved.expect(1);
     assert!(resolved.stderr.contains("already resolved"));
     assert_no_amend_advice(&resolved);
+    assert_eq!(scratch.lines().len(), 5);
+}
+
+#[cfg(unix)]
+#[test]
+fn amend_failed_append_has_no_advice_and_does_not_advance_the_ordinal() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new();
+    let id = twice_amended(&scratch);
+    let before = fs::read(scratch.ledger()).unwrap();
+    let permissions = fs::metadata(scratch.ledger()).unwrap().permissions();
+    fs::set_permissions(scratch.ledger(), fs::Permissions::from_mode(0o444)).unwrap();
+    let failed = scratch.run(&["amend", &id, "--until", FUTURE]);
+    fs::set_permissions(scratch.ledger(), permissions).unwrap();
+    failed.expect(1);
+    assert!(
+        failed.stderr.contains("Permission denied"),
+        "{}",
+        failed.stderr
+    );
+    assert_eq!(fs::read(scratch.ledger()).unwrap(), before);
+    assert_no_amend_advice(&failed);
+    // Positive control: the writable ledger accepts the same third move and warns.
+    let third = scratch.run(&["amend", &id, "--until", FUTURE]);
+    third.expect(0);
+    assert!(third.stderr.contains(&format!("third move of {id}")));
+    assert!(third.stderr.contains("a reason is expected"));
     assert_eq!(scratch.lines().len(), 4);
 }
 
 #[test]
 fn amend_feature_on_off_leaves_four_amend_read_surfaces_byte_identical() {
-    let scratch = Scratch::new();
-    let id = twice_amended(&scratch);
-    for _ in 0..2 {
-        scratch.run(&["amend", &id, "--until", FUTURE]).expect(0);
-    }
-    assert_eq!(
-        scratch
-            .events()
+    let ledgers = [Scratch::new(), Scratch::new(), Scratch::new()];
+    let id = "amend-byte-proof";
+    let mut amend_outputs = Vec::new();
+    for (scratch, (threshold, automated)) in
+        ledgers
             .iter()
-            .filter(|e| e["type"] == "amend")
-            .count(),
-        4
-    );
+            .zip([("3", false), ("0", false), ("3", true)])
+    {
+        scratch
+            .run(&[
+                "promise", "report", "--by", "debtor", "--to", "creditor", "--until", PAST, "--id",
+                id, "--ts", PAST,
+            ])
+            .expect(0);
+        let mut outputs = Vec::new();
+        for number in 1..=4 {
+            let mut args = vec!["amend", id, "--until", FUTURE, "--ts", PAST];
+            if automated {
+                args.push("--automated");
+            }
+            let run = scratch.run_with_ask_at(&args, threshold.as_ref());
+            run.expect(0);
+            if threshold == "3" && !automated && number >= 3 {
+                assert!(run.stderr.contains("still wanted"));
+                assert!(run.stderr.contains("a reason is expected"));
+            } else {
+                assert_no_amend_advice(&run);
+            }
+            outputs.push(run.stdout);
+        }
+        assert_eq!(
+            scratch
+                .events()
+                .iter()
+                .filter(|e| e["type"] == "amend")
+                .count(),
+            4
+        );
+        amend_outputs.push(outputs);
+    }
+    let enabled_bytes = fs::read(ledgers[0].ledger()).unwrap();
+    for (index, scratch) in ledgers.iter().enumerate().skip(1) {
+        assert_eq!(
+            enabled_bytes,
+            fs::read(scratch.ledger()).unwrap(),
+            "ledger variant {index}"
+        );
+        assert_eq!(
+            amend_outputs[0], amend_outputs[index],
+            "amend stdout variant {index}"
+        );
+    }
     for args in [
-        vec!["show", &id],
-        vec!["show", &id, "--json"],
+        vec!["show", id],
+        vec!["show", id, "--json"],
         vec!["ls", "--all"],
         vec!["ls", "--all", "--json"],
         vec!["export", "--now", FUTURE],
         vec!["export", "--format", "jsonl", "--now", FUTURE],
     ] {
-        let on = scratch.run_with_ask_at(&args, "3".as_ref());
-        let off = scratch.run_with_ask_at(&args, "0".as_ref());
-        on.expect(0);
-        off.expect(0);
+        let enabled = ledgers[0].run(&args);
+        enabled.expect(0);
         assert!(
-            !on.stdout.is_empty(),
-            "read must have produced output: {args:?}"
+            !enabled.stdout.is_empty(),
+            "read must produce output: {args:?}"
         );
-        assert_eq!(on.stdout.as_bytes(), off.stdout.as_bytes(), "{args:?}");
-        assert_eq!(on.stderr.as_bytes(), off.stderr.as_bytes(), "{args:?}");
+        for scratch in &ledgers[1..] {
+            let other = scratch.run(&args);
+            other.expect(0);
+            assert_eq!(
+                enabled.stdout.as_bytes(),
+                other.stdout.as_bytes(),
+                "{args:?}"
+            );
+            assert_eq!(
+                enabled.stderr.as_bytes(),
+                other.stderr.as_bytes(),
+                "{args:?}"
+            );
+        }
     }
 }
 
@@ -5767,10 +5933,10 @@ fn a_missing_hostname_command_fails_with_the_spawn_error() {
 //   src/state.rs 596   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
-//   src/verbs.rs 826   `_ => None` over `view.assessments`, which `fold` fills only
+//   src/verbs.rs 840   `_ => None` over `view.assessments`, which `fold` fills only
 //                      from `EventBody::Assess` events.
-//   src/verbs.rs 653  correction `--as` fallback: clap accepts only the five outcomes.
-//   src/verbs.rs 1260,1351,1377,1432  typed event fallbacks: the fold stores only
+//   src/verbs.rs 667  correction `--as` fallback: clap accepts only the five outcomes.
+//   src/verbs.rs 1274,1365,1391,1446  typed event fallbacks: the fold stores only
 //                      matching event types in these read-model fields.
 //   src/export.rs 296,320  typed event fallbacks: the fold stores only Assess and
 //                      Correct events in the corresponding collections.
@@ -5790,7 +5956,7 @@ fn a_missing_hostname_command_fails_with_the_spawn_error() {
 //   src/ledger.rs 442,455 `other => panic!("expected Malformed, …")`.
 //
 // One more thing a reader should not have to rediscover: the summary's "Missed Lines"
-// column is larger than this list (52 against 19). The difference is not a set of
+// column is larger than this list (51 against 19). The difference is not a set of
 // hidden gaps — no source line accounts for it. pinki is built twice under coverage,
 // once as the binary the tests here drive and once as the unit-test harness, and a
 // function present in both but exercised in only one is billed as missed lines against

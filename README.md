@@ -113,10 +113,12 @@ pinki amend "$id" --until 2030-01-02T00:00:00Z --reason "Review needs another da
 ```
 
 From the third move, stderr asks "is this still wanted?" and warns if `--reason`
-is absent; the amend still succeeds and stdout is unchanged. Clock-driven callers
-can use `--automated` to skip both lines for one call; `PINKI_AMEND_ASK_AT` sets the
-threshold (default `3`, `0` disables it; a value that is not a non-negative integer
-exits 2 without appending).
+is absent. Both lines start with `pinki: warning:` and print only after the append
+succeeds; stdout is unchanged. Clock-driven callers can use `--automated` to skip
+both lines for one call; `PINKI_AMEND_ASK_AT` sets the
+threshold (`0` disables it; unset or empty means `3`). Non-empty values must contain
+only ASCII digits and fit in `u64`; leading zeros are allowed, signs and whitespace
+are not. Invalid values exit 2 without appending.
 
 Resolve with a reference that the other agent can inspect. Add `--note TEXT` for a
 prose summary; it appears in `show` and never counts as evidence. Other outcomes are
