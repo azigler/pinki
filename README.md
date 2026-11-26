@@ -112,6 +112,12 @@ The debtor can move the deadline. pinki keeps each earlier deadline in the ledge
 pinki amend "$id" --until 2030-01-02T00:00:00Z --reason "Review needs another day"
 ```
 
+From the third move, stderr asks "is this still wanted?" and warns if `--reason`
+is absent; the amend still succeeds and stdout is unchanged. Clock-driven callers
+can use `--automated` to skip both lines for one call; `PINKI_AMEND_ASK_AT` sets the
+threshold (default `3`, `0` disables it; a value that is not a non-negative integer
+exits 2 without appending).
+
 Resolve with a reference that the other agent can inspect. Add `--note TEXT` for a
 prose summary; it appears in `show` and never counts as evidence. Other outcomes are
 `--cancelled --reason TEXT` and `--released` (by the creditor). Use

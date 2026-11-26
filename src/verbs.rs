@@ -334,6 +334,17 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
     // The shape of the command is checked before the ledger is consulted: an unreadable
     // deadline is malformed whether or not the id exists.
     let until = parse_until(&args.until)?;
+    let ask_at = match std::env::var("PINKI_AMEND_ASK_AT") {
+        Ok(value) => value.parse::<usize>().map_err(|_| {
+            Fail::Usage("PINKI_AMEND_ASK_AT must be a non-negative integer (0 disables it)".into())
+        })?,
+        Err(std::env::VarError::NotPresent) => 3,
+        Err(err) => {
+            return Err(Fail::Usage(format!(
+                "PINKI_AMEND_ASK_AT is not valid text: {err}"
+            )))
+        }
+    };
     let reason = match &args.reason {
         Some(reason) => Some(non_blank(reason, "--reason")?),
         None => None,
@@ -381,6 +392,32 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
             None => debtor,
         }
     };
+
+    // This is CLI advice, not a fold rule. Count every amend for this id;
+    // meta is opaque, including on events written by automation (§1/§4).
+    if !args.automated && ask_at > 0 {
+        let number = events
+            .iter()
+            .filter(|event| matches!(&event.body, EventBody::Amend { promise, .. } if promise == &args.id))
+            .count()
+            + 1;
+        if number >= ask_at {
+            let ordinal = [
+                "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth",
+                "ninth", "tenth",
+            ];
+            let movement = ordinal
+                .get(number - 1)
+                .map_or_else(|| format!("move {number}"), |name| format!("{name} move"));
+            eprintln!(
+                "pinki: {movement} of {}: is this still wanted? resolve, release or cancel it if not.",
+                args.id
+            );
+            if reason.is_none() {
+                eprintln!("pinki: a reason is expected from move {ask_at} on (--reason TEXT).");
+            }
+        }
+    }
 
     let event = Event::new(
         event_ts,

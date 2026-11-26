@@ -436,6 +436,25 @@ left to move. And "latest" means last in the log, not the largest `ts` — the f
 compares event timestamps, because a ledger whose lines are out of order is not one
 whose clock can be trusted to sort them.
 
+**The third move asks a question.** From the third amend of an id, the CLI prints
+one named stderr line asking whether the promise is still wanted. Without
+`--reason TEXT`, it prints a second line asking for a reason. It still appends,
+returns success, and prints the same stdout report. This starts as a warning:
+making a new check refuse a write needs a later decision.
+
+A weekly audit found 163 chronically extended promises, with slips up to 526 hours.
+When asked whether the work was still wanted, one debtor settled all 13 of its open
+promises in one pass: two kept with honest dates, two superseded, and nine abandoned.
+
+The count lives at the CLI edge, after existing refusals. It counts **every amend
+of that id**, including automation: §8.2 treats each as the debtor's act, and §1/§4
+keep `meta` opaque with no interpretation anywhere. The fold and read output do
+not change. `--automated` skips both lines for this call only, for an escalation
+ladder or watchdog moving a horizon on a clock; it writes no extra ledger data.
+`PINKI_AMEND_ASK_AT` sets the first move that asks (default `3`; `0` disables both
+lines). A value that cannot parse as a non-negative integer is a usage error
+(exit 2, nothing appended), even with `--automated`.
+
 **`resolve`** — ends one. Five outcomes:
 
 | `as` | Issued by | Requires |
@@ -592,7 +611,7 @@ pinki promise "hand back a reviewed schema" \
       [--meta '{"by":"scheduler","ref":"run-4131"}']
 
 pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed late"] \
-      [--meta '{"by":"expected-gap-watchdog","attempt":2}']
+      [--automated] [--meta '{"by":"expected-gap-watchdog","attempt":2}']
 
 pinki resolve pnk_4f3a91 --satisfied --evidence https://example.org/reviews/91
 pinki resolve pnk_4f3a91 --cancelled --reason "upstream schema was withdrawn"
@@ -668,9 +687,11 @@ These are optional additions: a ledger with none of these facts and no satisfied
 promises exports the same bytes as before.
 
 `amend` defaults `--by` to the debtor — the only party §8.2 admits — and refuses an
-explicit one that disagrees. `--reason` is encouraged, not required: an escalation
-ladder amends on a clock and has one reason for every rung — and, when it carries
-provenance, one `--meta` for every rung too.
+explicit one that disagrees. `--reason` is encouraged, not required. From the third
+move, stderr asks whether the work is still wanted and warns if a reason is absent;
+the write still succeeds. `--automated` skips both lines for one clock-driven move.
+`PINKI_AMEND_ASK_AT` changes the threshold (default `3`, `0` disables it; invalid
+values are usage errors). Provenance stays in opaque `--meta`, never in the count.
 
 `promise` mints an id unless `--id` gives it one, and an id you give it is opaque —
 § 1's id policy, enforced where the input arrives. Every other verb takes whatever id
