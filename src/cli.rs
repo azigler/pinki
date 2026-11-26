@@ -76,6 +76,12 @@ pub struct PromiseArgs {
     #[arg(long, value_name = "ID")]
     pub on: Option<String>,
 
+    /// With --on: how long after the antecedent is satisfied this is due, as <int>m,
+    /// <int>h, <int>d or an ISO-8601 duration (24h, PT24H). --until stays the outer
+    /// bound: the horizon is the earlier of --until and satisfaction + this.
+    #[arg(long, value_name = "DURATION")]
+    pub within: Option<String>,
+
     /// The A2A Task.id this promise is about, when there is one.
     #[arg(long, value_name = "ID")]
     pub task: Option<String>,

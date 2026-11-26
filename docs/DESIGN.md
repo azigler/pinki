@@ -31,6 +31,7 @@ One record type. A promise.
   "to":      "https://example.org/agents/author",
   "on":      "pnk_0c2b77",
   "until":   "2026-09-01T17:00:00Z",
+  "within":  "P1D",
   "task":    "a2a-task-9c1f0e"
 }
 ```
@@ -42,7 +43,8 @@ One record type. A promise.
 | `by` | yes | The **debtor** — who owes. An A2A AgentCard identity. |
 | `to` | yes | The **creditor** — who is owed. |
 | `on` | no | Antecedent: the `id` of another promise. Absent means born owed. |
-| `until` | yes | Deadline, ISO-8601. |
+| `until` | yes | Deadline, ISO-8601. With `within`, the debtor's outer bound: "at the latest". |
+| `within` | no | With `on` only: an ISO-8601 duration (`P1D`, `PT45M`, `P2D`) that runs from the moment the antecedent is satisfied. See below. |
 | `task` | no | The A2A `Task.id` this promise is *about*, when there is one. |
 | `meta` | no | An opaque object, carried and never interpreted. See below. |
 
@@ -189,6 +191,72 @@ one promise, and every reader then has to decide which one the `on` edge, the jo
 and the A2A `metadata` block key on. One field, opaque, is the smaller thing that
 works.
 
+### `within` is a horizon relative to the antecedent
+
+A dependent promise (`on` set) has no honest absolute date: it is owed when another
+promise is satisfied, and nobody knows when that is. A guessed `until` is then what
+gets amended, again and again. `within` states the real horizon: "24 hours after the
+antecedent is satisfied". `pinki promise ... --on X --within 24h` stores
+`"within":"P1D"`. The key sits after `until` and is absent when not given, so a ledger
+without it is unchanged.
+
+**Accepted units, and the one stored form.** The CLI takes `<int>s`, `<int>m`,
+`<int>h`, `<int>d` and `<int>w`, or an ISO-8601 duration with weeks, days, hours,
+minutes and seconds (`P1W`, `PT90M`, `P1DT12H`); the same units, short or long. A day
+counts as 24 hours. pinki parses to a whole number of seconds and stores exactly one
+spelling: `P<n>D` if the count divides by 86400, else `PT<n>H` if by 3600, else
+`PT<n>M` if by 60, else `PT<n>S`. So `1w`, `P1W` store `P7D`; `24h`, `PT24H0M0S`,
+`PT86400S` store `P1D`; `PT007H` stores `PT7H`. Fractions and commas (`PT1.5H`,
+`PT1,5H`), zero, negative values, anything over 3650 days, and **months and years**
+(no fixed length) are usage errors; so is `within` without `on`. Nothing is appended.
+
+A promise with `within` has two phases:
+
+1. **Before X is satisfied** the rules are the ones in §3 for any dependent: it is
+   `conditional`, never `overdue` (even past `until`), and it is `expired` when X ends
+   unsatisfied. There is no computed horizon yet.
+2. **Once X is satisfied** the relative clock starts at `t0 = max(t_sat, declared)`.
+   `t_sat` is the ledger instant at which X first reads satisfied: the `ts` of X's
+   winning satisfied `resolve`, or, when X became satisfied through a `correct`, the
+   `ts` of that `correct`. `declared` is the dependent's own declaration `ts`. The
+   **effective horizon** is `min(until, t0 + within)`, and `overdue`, `on_time` and the
+   `lapsed` check all read against it. So a dependent declared after X was satisfied
+   gets its full `within` from its own birth, and a `correct` that turns a lapsed X
+   satisfied gives the dependent its full `within` from the correction (until then it
+   was `expired`, as the `on` rules say). A `correct` that leaves X satisfied keeps the
+   earlier `t_sat`; one that moves X away from satisfied ends the clock.
+
+`until` stays required, so §1's "a promise without a deadline is a wish" still holds,
+and so does every old reader: a build that does not know `within` ignores the key and
+judges the promise against `until`, the outer bound. With `within`, `until` means "at
+the latest, whatever X does". It is a ceiling, not a guess, and it is the date to
+amend if the ceiling itself moves.
+
+What the other rules say, with no new rule added:
+
+- X is `cancelled`, `released`, `refused`, `lapsed` or `expired`: the existing `on`
+  rule applies and the dependent is `expired`. No effective horizon is computed.
+- X is `overdue`: X is late, not ended, so the dependent stays `conditional`.
+- `amend` moves `until` only. `within` never changes; to change it, declare a new
+  promise. After an amend the effective horizon is `min(new until, t0 + within)`. Once
+  `t0 + within` is the earlier of the two, a later `--until` changes nothing: the amend
+  still appends and prints one `pinki: warning:` line saying so. To get more time after
+  the relative horizon binds, resolve the promise and declare it again.
+- A `within` on a promise with no `on`, or one that cannot be parsed in a hand-written
+  ledger, is ignored by the fold, which then reads `until` as before. A promise that
+  waits on itself has no horizon.
+
+`show` prints `within` and, once X is satisfied, `effective`. `effective_until` is the
+computed absolute instant, absent before X is satisfied and absent for a promise with
+no `within`. It is in `show --json`, `export`, `ls --json` rows (flat and `--tree`) and
+both `a2a` blocks, as a sibling of `state` and never inside the verbatim record; `ls`
+text and `ls --tree` print it after the `until` as `(effective <instant>)`. A reader
+that shows `overdue` beside a future `until` must use this field, not compute from
+`until`. An older pinki (0.6.0) reads a ledger that holds `within` without error: it
+ignores the unknown key and sees only the outer bound `until`. With X open, 0.6.0 and
+the new build both say `conditional`. With X satisfied, 0.6.0 says `detached` where the
+new build may say `overdue`, because only the new build reads the relative horizon.
+
 ### `until` is required, and that is opinionated
 
 It is the one place pinki insists. A promise without a deadline cannot be checked
@@ -268,7 +336,7 @@ Given the record and the log, any two implementations produce the same answer.
 |---|---|
 | `conditional` | `on` is set and the antecedent is not yet satisfied |
 | `detached` | Owed now. Either no `on`, or the antecedent is satisfied |
-| `overdue` | `detached`, unresolved, and `now > until` |
+| `overdue` | `detached`, unresolved, and `now > until` (with `within`: `now >` the effective horizon, `min(until, t0 + within)`) |
 | `satisfied` | Resolved by the debtor, with evidence |
 | `cancelled` | Resolved by the debtor, with a reason |
 | `released` | Resolved by the creditor letting the debtor off |
@@ -609,7 +677,7 @@ no daemon, no server, no database.
 
 ```
 pinki promise "hand back a reviewed schema" \
-      --by reviewer --to author --until 2026-09-01T17:00Z [--on pnk_0c2b77] [--id ID] \
+      --by reviewer --to author --until 2026-09-01T17:00Z [--on pnk_0c2b77 [--within 24h]] [--id ID] \
       [--meta '{"by":"scheduler","ref":"run-4131"}']
 
 pinki amend   pnk_4f3a91 --until 2026-09-01T18:00Z [--reason "the draft landed late"] \

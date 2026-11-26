@@ -508,6 +508,7 @@ mod tests {
             to: "…/author".into(),
             on: Some("pnk_0c2b77".into()),
             until: "2026-09-01T17:00:00Z".into(),
+            within: None,
             task: None,
             meta: None,
         }

@@ -5921,29 +5921,29 @@ fn a_missing_hostname_command_fails_with_the_spawn_error() {
 // Unreachable defensive code — the arm exists so the fold cannot panic on a ledger
 // somebody else wrote, and the surrounding code makes it unconstructible:
 //
-//   src/state.rs 315  graph walk finds no view. Its roots and child ids come from
+//   src/state.rs 332  graph walk finds no view. Its roots and child ids come from
 //                     the fold, which creates the corresponding views.
-//   src/state.rs 507   `_ => State::Conditional` when a declared id has no memo entry.
+//   src/state.rs 554   `_ => State::Conditional` when a declared id has no memo entry.
 //                      Every id in `order` is solved before this runs, and `solve`
 //                      only ever terminates with `Memo::Done`.
-//   src/state.rs 575-577  the dangling arm in `solve`, for an id with no record.
+//   src/state.rs 696-698  the dangling arm in `solve`, for an id with no record.
 //                      `solve` is called only for ids in `records`, and an antecedent
 //                      is `contains_key`-checked before it is pushed on the stack, so
 //                      `self.records.get(current)` is always `Some`.
-//   src/state.rs 596   `None => State::Detached` for a resolution that is not one.
+//   src/state.rs 717   `None => State::Detached` for a resolution that is not one.
 //                      Only `EventBody::Resolve` events enter `resolutions`, and
 //                      `Event::resolution()` returns `Some` for exactly those.
-//   src/verbs.rs 840   `_ => None` over `view.assessments`, which `fold` fills only
+//   src/verbs.rs 886   `_ => None` over `view.assessments`, which `fold` fills only
 //                      from `EventBody::Assess` events.
-//   src/verbs.rs 667  correction `--as` fallback: clap accepts only the five outcomes.
-//   src/verbs.rs 1274,1365,1391,1446  typed event fallbacks: the fold stores only
+//   src/verbs.rs 713  correction `--as` fallback: clap accepts only the five outcomes.
+//   src/verbs.rs 1343,1434,1460,1516  typed event fallbacks: the fold stores only
 //                      matching event types in these read-model fields.
-//   src/export.rs 296,320  typed event fallbacks: the fold stores only Assess and
+//   src/export.rs 300,324  typed event fallbacks: the fold stores only Assess and
 //                      Correct events in the corresponding collections.
 //
 // Unreachable from a test harness:
 //
-//   src/verbs.rs 295   the `io::stdin().is_terminal()` refusal. A child spawned by a
+//   src/verbs.rs 323   the `io::stdin().is_terminal()` refusal. A child spawned by a
 //                      test never has a tty on stdin, and giving it one would mean a
 //                      pty dependency — which Cargo.toml exists to refuse. Exercised
 //                      by hand: `pinki promise` at a prompt.
@@ -5951,12 +5951,12 @@ fn a_missing_hostname_command_fails_with_the_spawn_error() {
 // Test-internal — the failure arm of an assertion, which by construction does not run
 // while the suite is green:
 //
-//   src/event.rs 730      `panic!` in `every_event_type_round_trips`.
-//   src/event.rs 930      `panic!` in `meta_survives_a_round_trip_on_every_event_type`.
-//   src/ledger.rs 442,455 `other => panic!("expected Malformed, …")`.
+//   src/event.rs 731      `panic!` in `every_event_type_round_trips`.
+//   src/event.rs 931      `panic!` in `meta_survives_a_round_trip_on_every_event_type`.
+//   src/ledger.rs 443,456 `other => panic!("expected Malformed, …")`.
 //
 // One more thing a reader should not have to rediscover: the summary's "Missed Lines"
-// column is larger than this list (51 against 19). The difference is not a set of
+// column is larger than this list (52 against 19). The difference is not a set of
 // hidden gaps — no source line accounts for it. pinki is built twice under coverage,
 // once as the binary the tests here drive and once as the unit-test harness, and a
 // function present in both but exercised in only one is billed as missed lines against
@@ -6763,4 +6763,706 @@ fn on_time_corrected_back_months_later_keeps_winning_resolve_instant() {
         scratch.run(&["show", "P", "--json"]).json()["on_time"],
         true
     );
+}
+
+// ------------------------------------------------------------------ within
+
+/// X is satisfied at 2020-01-10T00:00:00Z, so `--within 24h` puts the relative
+/// horizon at 2020-01-11T00:00:00Z.
+const X_SATISFIED_AT: &str = "2020-01-10T00:00:00Z";
+const X_PLUS_24H: &str = "2020-01-11T00:00:00Z";
+
+/// An antecedent `X` (still open) and a dependent `Y` on it with `--within`.
+fn within_pair(scratch: &Scratch, until: &str, within: &str) {
+    scratch
+        .run(&[
+            "promise", "land X", "--id", "X", "--by", "a", "--to", "b", "--until", FUTURE, "--ts",
+            PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "promise", "then Y", "--id", "Y", "--by", "a", "--to", "b", "--on", "X", "--within",
+            within, "--until", until, "--ts", PAST,
+        ])
+        .expect(0);
+}
+
+fn satisfy_x(scratch: &Scratch, at: &str) {
+    scratch
+        .run(&[
+            "resolve",
+            "X",
+            "--satisfied",
+            "--evidence",
+            "sha:x",
+            "--ts",
+            at,
+        ])
+        .expect(0);
+}
+
+fn export_row<'a>(document: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    document["promises"]
+        .as_array()
+        .expect("promises")
+        .iter()
+        .find(|p| p["id"] == id)
+        .unwrap_or_else(|| panic!("{id} missing from the export"))
+}
+
+#[test]
+fn within_dependent_is_conditional_not_overdue_and_has_no_computed_until_before_x_resolves() {
+    let scratch = Scratch::new();
+    // `until` is long past. Today's dependent stays conditional past its until; a
+    // dependent with `within` must do exactly the same.
+    within_pair(&scratch, "2020-01-02T00:00:00Z", "24h");
+    scratch
+        .run(&[
+            "promise",
+            "plain",
+            "--id",
+            "Z",
+            "--by",
+            "a",
+            "--to",
+            "b",
+            "--on",
+            "X",
+            "--until",
+            "2020-01-02T00:00:00Z",
+            "--ts",
+            PAST,
+        ])
+        .expect(0);
+    assert_eq!(state_of(&scratch, "Z"), "conditional");
+    assert_eq!(state_of(&scratch, "Y"), "conditional");
+    let shown = scratch.run(&["show", "Y", "--json"]);
+    shown.expect(0);
+    assert_eq!(shown.json()["within"], "P1D");
+    assert!(
+        shown.json().get("effective_until").is_none(),
+        "{}",
+        shown.stdout
+    );
+    let text = scratch.run(&["show", "Y"]);
+    assert!(text.stdout.contains("within       P1D"), "{}", text.stdout);
+    assert!(!text.stdout.contains("effective"), "{}", text.stdout);
+    let exported = scratch.run(&["export"]).json();
+    let row = export_row(&exported, "Y");
+    assert_eq!(row["within"], "P1D");
+    assert!(row.get("effective_until").is_none(), "{row}");
+}
+
+#[test]
+fn within_horizon_is_x_plus_within_when_earlier_than_until() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "24h");
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    let shown = scratch.run(&["show", "Y", "--json"]).json();
+    assert_eq!(shown["effective_until"], X_PLUS_24H);
+    // The outer bound and the duration are still the record's.
+    assert_eq!(shown["until"], "2020-02-01T00:00:00Z");
+    assert_eq!(shown["within"], "P1D");
+    let text = scratch.run(&["show", "Y"]);
+    assert!(
+        text.stdout.contains(&format!("effective    {X_PLUS_24H}")),
+        "{}",
+        text.stdout
+    );
+    let exported = scratch.run(&["export"]).json();
+    assert_eq!(export_row(&exported, "Y")["effective_until"], X_PLUS_24H);
+    assert_eq!(export_row(&exported, "Y")["within"], "P1D");
+    // The relative horizon passed years ago: overdue, though `until` has not.
+    assert_eq!(state_of(&scratch, "Y"), "overdue");
+}
+
+#[test]
+fn within_horizon_is_until_when_until_is_earlier() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-01-10T12:00:00Z", "2d");
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    let shown = scratch.run(&["show", "Y", "--json"]).json();
+    assert_eq!(shown["effective_until"], "2020-01-10T12:00:00Z");
+    assert_eq!(shown["within"], "P2D");
+    assert_eq!(state_of(&scratch, "Y"), "overdue");
+}
+
+#[test]
+fn within_is_not_overdue_while_the_relative_horizon_is_ahead() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, FUTURE, "3650d");
+    // X satisfied now: the horizon is ten years out, `until` is far later.
+    scratch
+        .run(&["resolve", "X", "--satisfied", "--evidence", "sha:x"])
+        .expect(0);
+    assert_eq!(state_of(&scratch, "Y"), "detached");
+    let shown = scratch.run(&["show", "Y", "--json"]).json();
+    let effective = shown["effective_until"].as_str().expect("an instant");
+    assert!(effective > "2030", "{effective}");
+    assert!(effective < FUTURE, "{effective}");
+}
+
+#[test]
+fn within_satisfied_before_the_horizon_is_on_time_and_after_it_is_late() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "24h");
+    scratch
+        .run(&[
+            "promise",
+            "also Y",
+            "--id",
+            "Y2",
+            "--by",
+            "a",
+            "--to",
+            "b",
+            "--on",
+            "X",
+            "--within",
+            "24h",
+            "--until",
+            "2020-02-01T00:00:00Z",
+            "--ts",
+            PAST,
+        ])
+        .expect(0);
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    for (id, at) in [
+        ("Y", "2020-01-10T23:00:00Z"),
+        ("Y2", "2020-01-12T00:00:00Z"),
+    ] {
+        scratch
+            .run(&[
+                "resolve",
+                id,
+                "--satisfied",
+                "--evidence",
+                "sha:y",
+                "--ts",
+                at,
+            ])
+            .expect(0);
+    }
+    assert_eq!(
+        scratch.run(&["show", "Y", "--json"]).json()["on_time"],
+        true
+    );
+    // Inside `until` (2020-02-01) but after X + 24h: late.
+    assert_eq!(
+        scratch.run(&["show", "Y2", "--json"]).json()["on_time"],
+        false
+    );
+    let exported = scratch.run(&["export"]).json();
+    assert_eq!(export_row(&exported, "Y")["on_time"], true);
+    assert_eq!(export_row(&exported, "Y2")["on_time"], false);
+}
+
+#[test]
+fn within_dependent_may_lapse_once_the_relative_horizon_has_passed() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, FUTURE, "24h");
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    // `until` is 2099, but the horizon the promise is judged against is 2020-01-11.
+    scratch
+        .run(&["resolve", "Y", "--lapsed", "--by", "creditor"])
+        .expect(0);
+    assert_eq!(state_of(&scratch, "Y"), "lapsed");
+}
+
+#[test]
+fn within_dependent_expires_when_x_is_cancelled_released_refused_or_lapses_or_expires() {
+    for how in ["cancelled", "released", "refused", "lapsed", "expired"] {
+        let scratch = Scratch::new();
+        scratch
+            .run(&[
+                "promise", "root", "--id", "W", "--by", "a", "--to", "b", "--until", PAST, "--ts",
+                PAST,
+            ])
+            .expect(0);
+        scratch
+            .run(&[
+                "promise", "land X", "--id", "X", "--by", "a", "--to", "b", "--on", "W", "--until",
+                PAST, "--ts", PAST,
+            ])
+            .expect(0);
+        scratch
+            .run(&[
+                "promise", "then Y", "--id", "Y", "--by", "a", "--to", "b", "--on", "X",
+                "--within", "24h", "--until", FUTURE, "--ts", PAST,
+            ])
+            .expect(0);
+        match how {
+            "cancelled" => scratch.run(&["resolve", "X", "--cancelled", "--reason", "no"]),
+            "released" => scratch.run(&["resolve", "X", "--released"]),
+            "refused" => scratch.run(&["resolve", "X", "--refused", "--by", "a", "--reason", "no"]),
+            "lapsed" => {
+                // Lapsing needs an owed promise past its horizon: end W first.
+                scratch
+                    .run(&["resolve", "W", "--satisfied", "--evidence", "sha:w"])
+                    .expect(0);
+                scratch.run(&["resolve", "X", "--lapsed", "--by", "creditor"])
+            }
+            _ => scratch.run(&["resolve", "W", "--cancelled", "--reason", "no"]),
+        }
+        .expect(0);
+        assert_eq!(state_of(&scratch, "Y"), "expired", "{how}");
+        let shown = scratch.run(&["show", "Y", "--json"]).json();
+        assert!(shown.get("effective_until").is_none(), "{how}: {shown}");
+    }
+}
+
+#[test]
+fn within_without_on_is_a_usage_error_and_appends_nothing() {
+    let scratch = Scratch::new();
+    let run = scratch.run(&[
+        "promise", "x", "--by", "a", "--to", "b", "--until", FUTURE, "--within", "24h",
+    ]);
+    run.expect(2);
+    assert!(run.stderr.contains("--on"), "{}", run.stderr);
+    assert!(scratch.lines().is_empty(), "nothing may be appended");
+}
+
+#[test]
+fn within_zero_negative_and_unknown_units_are_usage_errors_and_append_nothing() {
+    let scratch = Scratch::new();
+    for bad in [
+        "--within=0h",
+        "--within=-1h",
+        "--within=3x",
+        "--within=P1M",
+        "--within=24",
+    ] {
+        let run = scratch.run(&[
+            "promise", "x", "--by", "a", "--to", "b", "--on", "X", "--until", FUTURE, bad,
+        ]);
+        run.expect(2);
+        assert!(run.stderr.contains("--within"), "{bad}: {}", run.stderr);
+        assert!(scratch.lines().is_empty(), "{bad}: nothing may be appended");
+    }
+}
+
+#[test]
+fn within_in_a_stdin_record_stores_the_iso_form_and_obeys_the_same_checks() {
+    let scratch = Scratch::new();
+    let record = |on: &str, within: &str| {
+        format!(
+            r#"{{"id":"Y","promise":"then Y","by":"a","to":"b","until":"{FUTURE}"{on},"within":"{within}"}}"#
+        )
+    };
+    for (on, within) in [
+        ("", "24h"),
+        (r#","on":"X""#, "0h"),
+        (r#","on":"X""#, "-1h"),
+        (r#","on":"X""#, "3x"),
+    ] {
+        scratch.feed(&["promise"], &record(on, within)).expect(2);
+        assert!(
+            scratch.lines().is_empty(),
+            "{on} {within}: nothing appended"
+        );
+    }
+    scratch
+        .feed(&["promise"], &record(r#","on":"X""#, "24h"))
+        .expect(0);
+    assert_eq!(scratch.events()[0]["within"], "P1D");
+    // A flag beside a stdin record is refused rather than silently dropped.
+    let both = Scratch::new();
+    both.feed(
+        &["promise", "--within", "24h"],
+        &record(r#","on":"X""#, "PT1H"),
+    )
+    .expect(2);
+    assert!(both.lines().is_empty());
+}
+
+#[test]
+fn within_record_key_sits_after_until_and_is_absent_when_not_given() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "45m");
+    let lines = scratch.lines();
+    assert!(
+        lines[1].contains(r#""on":"X","until":"2020-02-01T00:00:00Z","within":"PT45M"}"#),
+        "{}",
+        lines[1]
+    );
+    assert!(!lines[0].contains("within"), "{}", lines[0]);
+}
+
+#[test]
+fn amend_moves_until_only_and_within_stays() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "24h");
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    // An outer bound earlier than X + 24h wins.
+    scratch
+        .run(&[
+            "amend",
+            "Y",
+            "--until",
+            "2020-01-10T06:00:00Z",
+            "--ts",
+            "2020-01-10T01:00:00Z",
+        ])
+        .expect(0);
+    let shown = scratch.run(&["show", "Y", "--json"]).json();
+    assert_eq!(shown["effective_until"], "2020-01-10T06:00:00Z");
+    assert_eq!(shown["within"], "P1D");
+    // Moved later again: the relative horizon is the earlier one once more.
+    scratch
+        .run(&[
+            "amend",
+            "Y",
+            "--until",
+            "2020-03-01T00:00:00Z",
+            "--ts",
+            "2020-01-10T02:00:00Z",
+        ])
+        .expect(0);
+    let shown = scratch.run(&["show", "Y", "--json"]).json();
+    assert_eq!(shown["until"], "2020-03-01T00:00:00Z");
+    assert_eq!(shown["effective_until"], X_PLUS_24H);
+    assert_eq!(shown["within"], "P1D");
+}
+
+/// The reads a ledger without any `within` must print exactly as 0.6.0 did.
+const NO_WITHIN_READS: &[&str] = &[
+    "ls --all",
+    "ls --all --json",
+    "ls --tree",
+    "ls --tree --json",
+    "show Y",
+    "show Y --json",
+    "a2a task Y --ext v0 --now 2030-01-01T00:00:00Z",
+    "a2a task Y --ext v1 --seat s --node n --now 2030-01-01T00:00:00Z",
+];
+
+#[test]
+fn ledger_without_within_reads_byte_identical_to_the_fixture_captured_from_main() {
+    // tests/fixtures/no-within-reads.txt was captured from a build of main (aea5fd3,
+    // before `within` existed) over exactly this ledger: stdout, stderr and exit code of
+    // every command above, so any new key, column or line makes this go red.
+    let scratch = Scratch::new();
+    for args in [
+        [
+            "promise", "land X", "--id", "X", "--by", "a", "--to", "b", "--until", FUTURE, "--ts",
+            PAST,
+        ]
+        .as_slice(),
+        &[
+            "promise", "then Y", "--id", "Y", "--by", "a", "--to", "b", "--on", "X", "--until",
+            FUTURE, "--ts", PAST,
+        ],
+        &[
+            "promise",
+            "late Z",
+            "--id",
+            "Z",
+            "--by",
+            "a",
+            "--to",
+            "b",
+            "--until",
+            "2020-02-01T00:00:00Z",
+            "--ts",
+            PAST,
+        ],
+    ] {
+        scratch.run(args).expect(0);
+    }
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    let mut transcript = String::new();
+    for line in NO_WITHIN_READS {
+        let args: Vec<&str> = line.split(' ').collect();
+        let run = scratch.run(&args);
+        transcript.push_str(&format!("=== {line}\n"));
+        transcript.push_str(&run.stdout);
+        transcript.push_str(&run.stderr);
+        transcript.push_str(&format!("rc={}\n", run.code));
+    }
+    assert_eq!(transcript, include_str!("fixtures/no-within-reads.txt"));
+}
+
+/// A dependent declared (at the real "now") after X was satisfied long ago.
+fn born_after_satisfaction(scratch: &Scratch) {
+    scratch
+        .run(&[
+            "promise", "land X", "--id", "X", "--by", "a", "--to", "b", "--until", FUTURE, "--ts",
+            PAST,
+        ])
+        .expect(0);
+    satisfy_x(scratch, X_SATISFIED_AT);
+    scratch
+        .run(&[
+            "promise", "then Y", "--id", "Y", "--by", "a", "--to", "b", "--on", "X", "--within",
+            "24h", "--until", FUTURE,
+        ])
+        .expect(0);
+}
+
+fn plus_24h(ts: &str) -> String {
+    let at: jiff::Timestamp = ts.parse().expect("an instant");
+    at.checked_add(jiff::SignedDuration::from_hours(24))
+        .expect("in range")
+        .to_string()
+}
+
+#[test]
+fn within_declared_after_x_was_satisfied_is_not_born_overdue_and_gets_its_full_within() {
+    let scratch = Scratch::new();
+    born_after_satisfaction(&scratch);
+    // X was satisfied in 2020; counting from there would make Y overdue at birth.
+    assert_eq!(state_of(&scratch, "Y"), "detached");
+    let declared = scratch.events()[2]["ts"].as_str().unwrap().to_string();
+    let shown = scratch.run(&["show", "Y", "--json"]).json();
+    assert_eq!(shown["effective_until"], plus_24h(&declared));
+}
+
+#[test]
+fn within_clock_restarts_at_a_correct_that_turns_x_satisfied() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&[
+            "promise", "land X", "--id", "X", "--by", "a", "--to", "b", "--until", PAST, "--ts",
+            PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&[
+            "promise", "then Y", "--id", "Y", "--by", "a", "--to", "b", "--on", "X", "--within",
+            "24h", "--until", FUTURE, "--ts", PAST,
+        ])
+        .expect(0);
+    scratch
+        .run(&["resolve", "X", "--lapsed", "--by", "observer"])
+        .expect(0);
+    assert_eq!(state_of(&scratch, "Y"), "expired");
+    scratch
+        .run(&[
+            "correct",
+            "X",
+            "--as",
+            "satisfied",
+            "--evidence",
+            "sha:done",
+            "--reason",
+            "it did land",
+            "--by",
+            "observer",
+        ])
+        .expect(0);
+    // Owed from the correction on, with the full 24h still ahead.
+    assert_eq!(state_of(&scratch, "Y"), "detached");
+    let corrected = scratch.events().last().unwrap()["ts"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let shown = scratch.run(&["show", "Y", "--json"]).json();
+    assert_eq!(shown["effective_until"], plus_24h(&corrected));
+}
+
+const AMEND_WARNING: &str = "pinki: warning: Y's horizon is set by its antecedent \
+                             (t0 + within = 2020-01-11T00:00:00Z); a later --until does not extend it.";
+
+#[test]
+fn amend_warns_once_when_the_relative_horizon_binds_and_a_later_until_changes_nothing() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "24h");
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    let before = scratch.lines().len();
+    let run = scratch.run(&["amend", "Y", "--until", "2020-03-01T00:00:00Z"]);
+    run.expect(0);
+    assert_eq!(scratch.lines().len(), before + 1, "the amend still appends");
+    assert_eq!(
+        run.stderr
+            .lines()
+            .filter(|line| line.contains("set by its antecedent"))
+            .collect::<Vec<_>>(),
+        [AMEND_WARNING],
+        "{}",
+        run.stderr
+    );
+    assert_eq!(state_of(&scratch, "Y"), "overdue");
+}
+
+#[test]
+fn amend_does_not_warn_while_x_is_not_satisfied() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "24h");
+    let run = scratch.run(&["amend", "Y", "--until", "2020-03-01T00:00:00Z"]);
+    run.expect(0);
+    assert!(
+        !run.stderr.contains("set by its antecedent"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn amend_does_not_warn_when_the_new_until_is_the_binding_one() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "24h");
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    // 2020-01-10T06:00 is earlier than X + 24h: the amend is what binds.
+    let run = scratch.run(&["amend", "Y", "--until", "2020-01-10T06:00:00Z"]);
+    run.expect(0);
+    assert!(
+        !run.stderr.contains("set by its antecedent"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn within_is_stored_in_one_canonical_form_and_odd_spellings_are_usage_errors() {
+    for (given, stored) in [
+        ("1w", "P7D"),
+        ("P1W", "P7D"),
+        ("PT007H", "PT7H"),
+        ("PT24H0M0S", "P1D"),
+        ("PT86400S", "P1D"),
+        ("90m", "PT90M"),
+        ("45s", "PT45S"),
+        ("3650d", "P3650D"),
+    ] {
+        let scratch = Scratch::new();
+        scratch
+            .run(&[
+                "promise", "x", "--by", "a", "--to", "b", "--on", "X", "--until", FUTURE,
+                "--within", given,
+            ])
+            .expect(0);
+        assert_eq!(scratch.events()[0]["within"], stored, "{given}");
+    }
+    for bad in [
+        "PT1.5H",
+        "PT1,5H",
+        "3651d",
+        "P3651D",
+        "PT175307616H",
+        "P7304484D",
+    ] {
+        let scratch = Scratch::new();
+        let run = scratch.run(&[
+            "promise", "x", "--by", "a", "--to", "b", "--on", "X", "--until", FUTURE, "--within",
+            bad,
+        ]);
+        run.expect(2);
+        assert!(run.stderr.contains("--within"), "{bad}: {}", run.stderr);
+        assert!(scratch.lines().is_empty(), "{bad}: nothing may be appended");
+    }
+    // The stdin record goes through the same check and the same canonical form.
+    let scratch = Scratch::new();
+    let record = format!(
+        r#"{{"id":"Y","promise":"then Y","by":"a","to":"b","until":"{FUTURE}","on":"X","within":"PT24H0M0S"}}"#
+    );
+    scratch.feed(&["promise"], &record).expect(0);
+    assert_eq!(scratch.events()[0]["within"], "P1D");
+}
+
+/// A satisfied X and a dependent Y whose relative horizon (2020-01-11) is earlier than
+/// its `until` (2020-02-01), so Y reads overdue beside a future-looking outer bound.
+fn overdue_beside_a_later_until(scratch: &Scratch) {
+    within_pair(scratch, "2020-02-01T00:00:00Z", "24h");
+    satisfy_x(scratch, X_SATISFIED_AT);
+}
+
+#[test]
+fn ls_json_and_tree_json_rows_carry_effective_until_once_known() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "24h");
+    // Not known yet: absent from every row.
+    for args in [
+        vec!["ls", "--all", "--json"],
+        vec!["ls", "--tree", "--json"],
+    ] {
+        let run = scratch.run(&args);
+        run.expect(0);
+        assert!(!run.stdout.contains("effective_until"), "{}", run.stdout);
+    }
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    let rows = scratch.run(&["ls", "--all", "--json"]).json();
+    let y = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "Y")
+        .unwrap();
+    assert_eq!(y["state"], "overdue");
+    assert_eq!(y["until"], "2020-02-01T00:00:00Z");
+    assert_eq!(y["effective_until"], X_PLUS_24H);
+    let x = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "X")
+        .unwrap();
+    assert!(x.get("effective_until").is_none(), "{x}");
+    let tree = scratch.run(&["ls", "--tree", "--all", "--json"]).json();
+    assert_eq!(tree[0]["children"][0]["id"], "Y");
+    assert_eq!(tree[0]["children"][0]["effective_until"], X_PLUS_24H);
+}
+
+#[test]
+fn ls_text_and_tree_show_the_effective_horizon_after_the_until() {
+    let scratch = Scratch::new();
+    overdue_beside_a_later_until(&scratch);
+    let suffix = "2020-02-01T00:00:00Z (effective 2020-01-11T00:00:00Z)";
+    for args in [vec!["ls", "--all"], vec!["ls", "--tree", "--all"]] {
+        let run = scratch.run(&args);
+        run.expect(0);
+        let line = run
+            .stdout
+            .lines()
+            .find(|line| line.trim_start().starts_with("Y "))
+            .unwrap_or_else(|| panic!("no Y row:\n{}", run.stdout));
+        assert!(line.contains(suffix), "{line}");
+        // X has no `within`: its row stays plain.
+        assert!(
+            !run.stdout
+                .lines()
+                .filter(|l| l.trim_start().starts_with("X "))
+                .any(|l| l.contains("effective")),
+            "{}",
+            run.stdout
+        );
+    }
+}
+
+#[test]
+fn a2a_blocks_carry_effective_until_beside_state_and_not_inside_the_record() {
+    let scratch = Scratch::new();
+    within_pair(&scratch, "2020-02-01T00:00:00Z", "24h");
+    let v0_key = "https://github.com/azigler/pinki/ext/promise/v0/promise";
+    let v1_key = "https://github.com/azigler/pinki/ext/promise/v1/promises";
+    let v1_args = [
+        "a2a", "task", "Y", "--ext", "v1", "--seat", "s", "--node", "n",
+    ];
+    // Before X is satisfied: no computed horizon in either block.
+    for args in [vec!["a2a", "task", "Y", "--ext", "v0"], v1_args.to_vec()] {
+        let run = scratch.run(&args);
+        run.expect(0);
+        assert!(!run.stdout.contains("effective_until"), "{}", run.stdout);
+    }
+    satisfy_x(&scratch, X_SATISFIED_AT);
+    let v0 = scratch.run(&["a2a", "task", "Y", "--ext", "v0"]).json();
+    let v1 = scratch.run(&v1_args).json();
+    for block in [&v0[v0_key], &v1[v1_key][0]] {
+        assert_eq!(block["state"], "overdue");
+        assert_eq!(block["effective_until"], X_PLUS_24H, "{block}");
+        assert_eq!(block["until"], "2020-02-01T00:00:00Z");
+        assert_eq!(block["within"], "P1D");
+    }
+}
+
+#[test]
+fn show_json_and_export_still_carry_effective_until() {
+    let scratch = Scratch::new();
+    overdue_beside_a_later_until(&scratch);
+    assert_eq!(
+        scratch.run(&["show", "Y", "--json"]).json()["effective_until"],
+        X_PLUS_24H
+    );
+    let exported = scratch.run(&["export"]).json();
+    assert_eq!(export_row(&exported, "Y")["effective_until"], X_PLUS_24H);
 }

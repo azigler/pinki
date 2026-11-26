@@ -106,6 +106,23 @@ pinki show "$id" --waiters --json
 If `on` names an id absent from this ledger, the promise appears as a root
 marked `unknown antecedent` in text and `unknown_antecedent` in tree JSON.
 
+A dependent promise has no honest date, because it is owed when the antecedent is
+satisfied. Add `--within 24h` (or `30s`, `45m`, `2d`, `1w`, `PT24H`) to say how long
+after that moment it is due; pinki stores one canonical form (`P1D`). `--until` stays
+required as the outer bound: the horizon is the earlier of `--until` and the later of
+the antecedent's satisfaction and this promise's declaration, plus `--within`. The
+promise is never overdue before the antecedent is satisfied. `show`, `export`, `ls`
+and the `a2a` blocks print the computed `effective_until` once it is known; `amend`
+moves `--until` only. To get more time after the relative horizon binds, resolve the
+promise and declare it again.
+
+```sh
+pinki promise "Announce the reviewed schema" \
+  --by https://example.org/agents/author \
+  --to https://example.org/agents/publisher \
+  --until 2030-02-01T00:00:00Z --on "$id" --within 24h
+```
+
 The debtor can move the deadline. pinki keeps each earlier deadline in the ledger.
 
 ```sh

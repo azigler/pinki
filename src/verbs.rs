@@ -42,7 +42,7 @@ use crate::event::{CorrectAs, Event, EventBody, Resolution, RETRACTED, VIOLATED}
 use crate::export;
 use crate::id;
 use crate::ledger;
-use crate::record::{Meta, Promise};
+use crate::record::{canonical_within, Meta, Promise};
 use crate::state::{fold, Fold, GraphVisit, Horizon, PromiseView, State};
 
 /// A command that did not succeed.
@@ -131,6 +131,8 @@ struct Incoming {
     on: Option<String>,
     until: String,
     #[serde(default)]
+    within: Option<String>,
+    #[serde(default)]
     task: Option<String>,
     /// Taken as an untyped value rather than a [`Meta`] so that "meta is not an
     /// object" is refused in pinki's own words, citing §1, exactly as the `--meta`
@@ -152,6 +154,7 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
             to: required_flag(args.to, "--to")?,
             on: args.on,
             until: required_flag(args.until, "--until")?,
+            within: args.within,
             task: args.task,
             meta: match &args.meta {
                 Some(json) => Some(parse_meta(json)?),
@@ -167,6 +170,14 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
                     "--meta and a record on stdin are two ways to say the same thing, and pinki \
                      will not guess which one you meant: put `meta` inside the record you are \
                      piping in (§1). Nothing was appended"
+                        .into(),
+                ));
+            }
+            if args.within.is_some() {
+                return Err(Fail::Usage(
+                    "--within and a record on stdin are two ways to say the same thing, and \
+                     pinki will not guess which one you meant: put `within` inside the record \
+                     you are piping in (§1). Nothing was appended"
                         .into(),
                 ));
             }
@@ -189,6 +200,22 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
     let by = non_blank(&incoming.by, "`by`")?;
     let to = non_blank(&incoming.to, "`to`")?;
     let until = parse_until(&incoming.until)?;
+    // `within` is checked before the ledger is consulted, like `--until`: a horizon
+    // pinki cannot read is malformed whether or not the antecedent exists. It means
+    // "after `on` is satisfied", so without `on` it has nothing to run from.
+    let within = match &incoming.within {
+        Some(raw) => {
+            if incoming.on.is_none() {
+                return Err(Fail::Usage(
+                    "--within runs from the moment the antecedent is satisfied, so it needs \
+                     --on ID (§1). Nothing was appended"
+                        .into(),
+                ));
+            }
+            Some(parse_within(raw)?)
+        }
+        None => None,
+    };
     let meta = match &incoming.meta {
         Some(value) => Some(check_meta(value)?),
         None => None,
@@ -265,6 +292,7 @@ fn promise(args: PromiseArgs) -> Result<(), Fail> {
         to,
         on,
         until,
+        within,
         task: match incoming.task {
             Some(task) => Some(non_blank(&task, "`task`")?),
             None => None,
@@ -308,7 +336,7 @@ fn read_incoming_from_stdin() -> Result<Incoming, Fail> {
         Fail::Usage(format!(
             "the record on stdin is not a promise: {e}\n\
              expected an object with `promise`, `by`, `to`, `until`, and optionally `id`, `on`, \
-             `task`, `meta`, `ts` — no other keys"
+             `within`, `task`, `meta`, `ts` — no other keys"
         ))
     })
 }
@@ -365,7 +393,7 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
     let now = now_to_the_second();
     let (event_ts, source) = event_timestamp(args.ts.as_deref(), now)?;
 
-    let by = {
+    let (by, relative_until) = {
         let folded = fold(&events, now);
         let view = folded
             .get(&args.id)
@@ -384,7 +412,7 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
         }
 
         let debtor = view.record.by.clone();
-        match &args.by {
+        let by = match &args.by {
             Some(given) => {
                 let given = non_blank(given, "`by`")?;
                 if given != debtor {
@@ -400,16 +428,34 @@ fn amend(args: AmendArgs) -> Result<(), Fail> {
                 given
             }
             None => debtor,
-        }
+        };
+        (by, view.relative_until.clone())
     };
 
     let missing_reason = reason.is_none();
     let event = Event::new(
         event_ts,
-        EventBody::amend(&args.id, by, until, reason).with_meta(meta),
+        EventBody::amend(&args.id, by, until.clone(), reason).with_meta(meta),
     )
     .with_source(source);
     append(&event)?;
+
+    // `t0 + within` is already known (the antecedent is satisfied) and is the earlier of
+    // the two horizons under the new `until`: the move cannot extend the horizon. The
+    // amend is still recorded, since `until` is the outer bound. Advice, not a rule.
+    if let Some(relative) = relative_until.as_deref() {
+        let binds = Timestamp::from_str(relative)
+            .ok()
+            .zip(Timestamp::from_str(&until).ok())
+            .is_some_and(|(relative, until)| relative < until);
+        if binds {
+            eprintln!(
+                "pinki: warning: {}'s horizon is set by its antecedent (t0 + within = {relative}); \
+                 a later --until does not extend it.",
+                args.id
+            );
+        }
+    }
 
     // This is CLI advice, not a fold rule. Count every amend for this id;
     // meta is opaque, including on events written by automation (§1/§4).
@@ -490,17 +536,17 @@ fn resolve(args: ResolveArgs) -> Result<(), Fail> {
             )));
         }
         if matches!(outcome, Outcome::Lapsed(_)) {
-            let until = Timestamp::from_str(view.until()).map_err(|e| {
+            let until = Timestamp::from_str(view.deadline()).map_err(|e| {
                 Fail::Op(format!(
                     "cannot lapse `{}`: current horizon `{}` cannot be evaluated as an instant ({e}). Nothing was appended",
                     args.id,
-                    view.until()
+                    view.deadline()
                 ))
             })?;
             if now <= until {
                 return Err(Fail::Op(format!(
                     "`{}` may not lapse before its current horizon {} (§4): the clock has not run out. Nothing was appended",
-                    args.id, view.until()
+                    args.id, view.deadline()
                 )));
             }
         }
@@ -926,6 +972,10 @@ struct Row<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<&'a str>,
     state: &'static str,
+    /// The horizon `state` is judged against, once `within` has produced one. Absent
+    /// before the antecedent is satisfied and for a promise with no `within`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_until: Option<String>,
 }
 
 /// A tree row has the same record and state as flat `ls`; only the presentation
@@ -953,6 +1003,17 @@ fn row<'a>(view: &PromiseView<'a>) -> Row<'a> {
         ts: view.horizons[0].ts,
         source: view.horizons[0].source,
         state: view.state.as_str(),
+        effective_until: view.effective_until.clone(),
+    }
+}
+
+/// The horizon column of `ls` text and `ls --tree`: the current `until`, and the
+/// effective horizon after it once `within` has produced one. A row without `within`
+/// prints exactly the `until`.
+fn until_label(view: &PromiseView<'_>) -> String {
+    match &view.effective_until {
+        Some(effective) => format!("{} (effective {effective})", view.until()),
+        None => view.until().to_string(),
     }
 }
 
@@ -1014,7 +1075,7 @@ fn print_graph_rows(visits: &[GraphVisit<'_, '_>], folded: &Fold<'_>) {
             "{indent}{}  {}  {}  {} -> {}  {}{missing}",
             view.id(),
             state_label(view),
-            view.until(),
+            until_label(view),
             view.record.by,
             view.record.to,
             ellipsize(&view.record.promise, 56),
@@ -1078,19 +1139,21 @@ fn ls(args: LsArgs) -> Result<(), Fail> {
     let id_width = width(rows.iter().map(|view| view.id()));
     let labels: Vec<String> = rows.iter().map(|view| state_label(view)).collect();
     let state_width = width(labels.iter().map(String::as_str));
-    let until_width = width(rows.iter().map(|view| view.until()));
+    let untils: Vec<String> = rows.iter().map(|view| until_label(view)).collect();
+    let until_width = width(untils.iter().map(String::as_str));
     let parties: Vec<String> = rows
         .iter()
         .map(|view| format!("{} -> {}", view.record.by, view.record.to))
         .collect();
     let party_width = width(parties.iter().map(String::as_str));
 
-    for ((view, party), label) in rows.iter().zip(parties.iter()).zip(&labels) {
+    for (((view, party), label), until) in rows.iter().zip(parties.iter()).zip(&labels).zip(&untils)
+    {
         println!(
             "{:<id_width$}  {:<state_width$}  {:<until_width$}  {:<party_width$}  {}",
             view.id(),
             label,
-            view.until(),
+            until,
             party,
             ellipsize(&view.record.promise, 56),
         );
@@ -1171,6 +1234,12 @@ struct Detail<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<&'a str>,
     state: &'static str,
+    /// The horizon `state` is judged against once `within` has produced one: the earlier
+    /// of `until` and the time the antecedent first read satisfied (or the dependent's
+    /// own declaration, if later) plus `within`. Absent before that, and absent for a
+    /// promise with no `within`. A sibling of `state`, not part of the record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_until: Option<&'a str>,
     /// Every deadline this promise has had, in log order — the declaration first, then
     /// one entry per `amend`. Always at least one, and its last entry's `until` is the
     /// `until` above.
@@ -1396,6 +1465,7 @@ fn detail<'a>(view: &'a PromiseView<'a>) -> Detail<'a> {
         ts: view.horizons[0].ts,
         source: view.horizons[0].source,
         state: view.state.as_str(),
+        effective_until: view.effective_until.as_deref(),
         horizons,
         resolution,
         corrections,
@@ -1476,6 +1546,12 @@ fn show(args: ShowArgs) -> Result<(), Fail> {
         println!("  on           {on}");
     }
     println!("  until        {}", view.until());
+    if let Some(within) = &view.record.within {
+        println!("  within       {within} after the antecedent is satisfied");
+        if let Some(effective) = &view.effective_until {
+            println!("  effective    {effective}");
+        }
+    }
     if view.horizons[0].source == Some("supplied") {
         println!("  declared     {} (supplied)", view.horizons[0].ts);
     }
@@ -1894,6 +1970,40 @@ fn parse_until(until: &str) -> Result<String, Fail> {
         })
 }
 
+/// Parse `--within` and return the one canonical ISO-8601 duration to store.
+///
+/// `<int>s`, `<int>m`, `<int>h`, `<int>d` and `<int>w` are the short forms; an ISO-8601
+/// duration (`PT24H`, `P2D`) is accepted too. Either way the stored text is
+/// [`canonical_within`]'s. Zero, negative, fractions, commas, anything over 3650 days
+/// and anything with years or months are usage errors — see [`crate::record::within_duration`].
+fn parse_within(raw: &str) -> Result<String, Fail> {
+    let trimmed = raw.trim();
+    let usage = |why: String| {
+        Fail::Usage(format!(
+            "--within {why}\n\
+             give a positive length of at most 3650 days as `30s`, `45m`, `24h`, `2d`, `1w` \
+             or an ISO-8601 duration like `PT24H`. Months and years have no fixed length. \
+             Nothing was appended"
+        ))
+    };
+    let iso = match trimmed.char_indices().last() {
+        Some((at, unit @ ('s' | 'm' | 'h' | 'd' | 'w' | 'S' | 'M' | 'H' | 'D' | 'W')))
+            if at > 0 && trimmed[..at].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            let count = &trimmed[..at];
+            match unit.to_ascii_lowercase() {
+                's' => format!("PT{count}S"),
+                'm' => format!("PT{count}M"),
+                'h' => format!("PT{count}H"),
+                'd' => format!("P{count}D"),
+                _ => format!("P{count}W"),
+            }
+        }
+        _ => trimmed.to_ascii_uppercase(),
+    };
+    canonical_within(&iso).map_err(|why| usage(format!("`{trimmed}`: {why}")))
+}
+
 /// The cap on one `meta` object, in bytes of its compact JSON form.
 ///
 /// Generous on purpose — provenance is a handful of short keys, and 8 KiB is two
@@ -2035,6 +2145,87 @@ mod tests {
     fn exit_codes_split_malformed_from_operational() {
         assert_eq!(Fail::Usage("x".into()).code(), 2);
         assert_eq!(Fail::Op("x".into()).code(), 1);
+    }
+
+    #[test]
+    fn within_short_forms_are_stored_as_iso_durations() {
+        for (given, stored) in [
+            ("24h", "P1D"),
+            ("45m", "PT45M"),
+            ("2d", "P2D"),
+            (" 24H ", "P1D"),
+            ("pt24h", "P1D"),
+            ("PT90M", "PT90M"),
+            ("P2D", "P2D"),
+            ("30s", "PT30S"),
+            ("1w", "P7D"),
+            ("90m", "PT90M"),
+            ("48h", "P2D"),
+        ] {
+            assert_eq!(parse_within(given).unwrap(), stored, "{given:?}");
+        }
+    }
+
+    #[test]
+    fn within_is_stored_in_exactly_one_canonical_form() {
+        // days, else hours, else minutes, else seconds; one spelling per length.
+        for (given, stored) in [
+            ("P1W", "P7D"),
+            ("PT007H", "PT7H"),
+            ("PT24H0M0S", "P1D"),
+            ("PT86400S", "P1D"),
+            ("P0DT24H", "P1D"),
+            ("PT3600S", "PT1H"),
+            ("PT120S", "PT2M"),
+            ("PT90S", "PT90S"),
+            ("P1DT12H", "PT36H"),
+            ("PT1H30M", "PT90M"),
+        ] {
+            assert_eq!(parse_within(given).unwrap(), stored, "{given:?}");
+        }
+    }
+
+    #[test]
+    fn within_fractions_commas_and_over_the_cap_are_usage_errors() {
+        for bad in [
+            "PT1.5H",
+            "PT1,5H",
+            "P0.5D",
+            "PT0.5S",
+            "3651d",
+            "P3651D",
+            "PT87625H",
+            "PT315360001S",
+            "PT175307616H",
+            "P7304484D",
+        ] {
+            let err = parse_within(bad).unwrap_err();
+            assert!(matches!(err, Fail::Usage(_)), "{bad:?}");
+        }
+        // The cap itself is allowed.
+        assert_eq!(parse_within("3650d").unwrap(), "P3650D");
+        assert_eq!(parse_within("PT87600H").unwrap(), "P3650D");
+    }
+
+    #[test]
+    fn within_zero_negative_and_unknown_units_are_usage_errors() {
+        for bad in [
+            "0h",
+            "0m",
+            "0d",
+            "-1h",
+            "3x",
+            "h",
+            "",
+            "24",
+            "1.5h",
+            "P1M",
+            "99999999999999999999d",
+        ] {
+            let err = parse_within(bad).unwrap_err();
+            assert!(matches!(err, Fail::Usage(_)), "{bad:?}");
+            assert!(err.to_string().contains("--within"), "{bad:?}: {err}");
+        }
     }
 
     #[test]

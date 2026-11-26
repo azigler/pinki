@@ -316,6 +316,7 @@ mod tests {
                 to: "…/author".into(),
                 on: None,
                 until: "2026-09-01T17:00:00Z".into(),
+                within: None,
                 task: None,
                 meta: None,
             }),

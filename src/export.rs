@@ -42,6 +42,10 @@ struct ExportPromise<'a> {
     #[serde(flatten)]
     record: Cow<'a, Promise>,
     original_until: &'a str,
+    /// Once `within` has produced one: the earlier of `until` and the antecedent's
+    /// satisfaction plus `within`. Absent before that, and without a `within`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_until: Option<&'a str>,
     amendments: Vec<Amendment<'a>>,
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -324,6 +328,7 @@ fn project<'a>(view: &'a PromiseView<'a>, folded: &Fold<'a>) -> ExportPromise<'a
     ExportPromise {
         record: view.current_record(),
         original_until: view.record.until.as_str(),
+        effective_until: view.effective_until.as_deref(),
         amendments,
         state: view.state.as_str(),
         on_time: view.on_time(),

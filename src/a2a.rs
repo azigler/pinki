@@ -255,6 +255,7 @@ mod tests {
             to: "https://example.org/agents/author".into(),
             on: Some("pnk_0c2b77".into()),
             until: "2026-09-01T17:00:00Z".into(),
+            within: None,
             task: Some("a2a-task-9c1f0e".into()),
             meta: None,
         }
