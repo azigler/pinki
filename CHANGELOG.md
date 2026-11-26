@@ -14,17 +14,24 @@ tools can depend on them, not merely read them.
 ### Added
 
 - `pinki promise --on ID --within DURATION` gives a dependent promise a horizon
-  relative to its antecedent. `DURATION` is `<int>m`, `<int>h`, `<int>d` or an
-  ISO-8601 duration; the record stores the ISO form (`"within":"PT24H"`) after
-  `until`, and the key is absent when not given. `--until` stays required as the
-  outer bound. The promise is `conditional`, never overdue, until the antecedent
-  is satisfied at `t`; then `overdue`, `on_time` and `lapsed` read against
-  `min(until, t + within)`. `show` (text and `--json`) and `export` add the
-  computed `effective_until` once it is known. `within` without `on`, and a zero,
-  negative or unknown-unit duration, exit 2 without appending. `amend` moves
-  `until` only. Ledgers without `within` read byte-for-byte as before, and 0.6.0
-  reads a ledger that holds `within`, seeing only the outer bound. A minor bump
-  at the next release.
+  relative to its antecedent. `DURATION` is `<int>s|m|h|d|w` or an ISO-8601
+  duration; pinki parses it to whole seconds and stores one canonical form after
+  `until` (`P<n>D`, else `PT<n>H`, `PT<n>M`, `PT<n>S`; `"within":"P1D"`), and the key
+  is absent when not given. Fractions, commas, months, years, zero, negative and
+  anything over 3650 days exit 2 without appending. `--until` stays required as the
+  outer bound. The promise is `conditional`, never overdue, until the antecedent is
+  satisfied; then `overdue`, `on_time` and `lapsed` read against
+  `min(until, t0 + within)`, where `t0` is the later of the instant X first read
+  satisfied (its `resolve`, or the `correct` that turned it satisfied) and the
+  dependent's own declaration. `show` (text and `--json`), `export`, `ls --json` rows
+  and both `a2a` blocks carry the computed `effective_until` once known; `ls` text and
+  `ls --tree` print `(effective <instant>)` after the `until`. `within` without `on`
+  exits 2 without appending. `amend` moves `until` only, and prints one
+  `pinki: warning:` line when the relative horizon already binds and a later `--until`
+  changes nothing. Ledgers without `within` read byte-for-byte as before. 0.6.0 reads
+  a ledger that holds `within` without error and sees only the outer bound; with the
+  antecedent open both say `conditional`, with it satisfied 0.6.0 says `detached`
+  where this build may say `overdue`. A minor bump at the next release.
 
 - `amend` asks whether a promise is still wanted from its third move and warns
   when `--reason` is absent. Both stderr lines start with `pinki: warning:` and

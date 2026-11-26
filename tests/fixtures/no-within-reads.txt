@@ -1,0 +1,171 @@
+=== ls --all
+X  satisfied (on time)  2099-01-01T00:00:00Z  a -> b  land X
+Y  detached             2099-01-01T00:00:00Z  a -> b  then Y
+Z  overdue              2020-02-01T00:00:00Z  a -> b  late Z
+rc=0
+=== ls --all --json
+[
+  {
+    "id": "X",
+    "promise": "land X",
+    "by": "a",
+    "to": "b",
+    "until": "2099-01-01T00:00:00Z",
+    "ts": "2020-01-01T00:00:00Z",
+    "source": "supplied",
+    "state": "satisfied"
+  },
+  {
+    "id": "Y",
+    "promise": "then Y",
+    "by": "a",
+    "to": "b",
+    "on": "X",
+    "until": "2099-01-01T00:00:00Z",
+    "ts": "2020-01-01T00:00:00Z",
+    "source": "supplied",
+    "state": "detached"
+  },
+  {
+    "id": "Z",
+    "promise": "late Z",
+    "by": "a",
+    "to": "b",
+    "until": "2020-02-01T00:00:00Z",
+    "ts": "2020-01-01T00:00:00Z",
+    "source": "supplied",
+    "state": "overdue"
+  }
+]
+rc=0
+=== ls --tree
+Y  detached  2099-01-01T00:00:00Z  a -> b  then Y
+Z  overdue  2020-02-01T00:00:00Z  a -> b  late Z
+rc=0
+=== ls --tree --json
+[
+  {
+    "id": "Y",
+    "promise": "then Y",
+    "by": "a",
+    "to": "b",
+    "on": "X",
+    "until": "2099-01-01T00:00:00Z",
+    "ts": "2020-01-01T00:00:00Z",
+    "source": "supplied",
+    "state": "detached",
+    "children": []
+  },
+  {
+    "id": "Z",
+    "promise": "late Z",
+    "by": "a",
+    "to": "b",
+    "until": "2020-02-01T00:00:00Z",
+    "ts": "2020-01-01T00:00:00Z",
+    "source": "supplied",
+    "state": "overdue",
+    "children": []
+  }
+]
+rc=0
+=== show Y
+Y  detached
+  promise      then Y
+  by           a
+  to           b
+  on           X
+  until        2099-01-01T00:00:00Z
+  declared     2020-01-01T00:00:00Z (supplied)
+  resolution   (unresolved)
+  assessments  (none)
+rc=0
+=== show Y --json
+{
+  "id": "Y",
+  "promise": "then Y",
+  "by": "a",
+  "to": "b",
+  "on": "X",
+  "until": "2099-01-01T00:00:00Z",
+  "ts": "2020-01-01T00:00:00Z",
+  "source": "supplied",
+  "state": "detached",
+  "horizons": [
+    {
+      "ts": "2020-01-01T00:00:00Z",
+      "source": "supplied",
+      "until": "2099-01-01T00:00:00Z",
+      "by": "a"
+    }
+  ],
+  "resolution": null,
+  "corrections": [],
+  "assessments": []
+}
+rc=0
+=== a2a task Y --ext v0 --now 2030-01-01T00:00:00Z
+{
+  "https://github.com/azigler/pinki/ext/promise/v0/promise": {
+    "id": "Y",
+    "promise": "then Y",
+    "by": "a",
+    "to": "b",
+    "on": "X",
+    "until": "2099-01-01T00:00:00Z",
+    "ts": "2020-01-01T00:00:00Z",
+    "source": "supplied",
+    "state": "detached",
+    "horizons": [
+      {
+        "ts": "2020-01-01T00:00:00Z",
+        "source": "supplied",
+        "until": "2099-01-01T00:00:00Z",
+        "by": "a"
+      }
+    ],
+    "resolution": null,
+    "corrections": [],
+    "assessments": [],
+    "provenance": {
+      "as_of": "2030-01-01T00:00:00Z",
+      "ledger_ref": "sha256:84912095685baac82eef4bc32fc92782b3918d8c36591a4b0056caafc3f0c7f2"
+    }
+  }
+}
+rc=0
+=== a2a task Y --ext v1 --seat s --node n --now 2030-01-01T00:00:00Z
+{
+  "https://github.com/azigler/pinki/ext/promise/v1/promises": [
+    {
+      "id": "Y",
+      "promise": "then Y",
+      "by": "a",
+      "to": "b",
+      "on": "X",
+      "until": "2099-01-01T00:00:00Z",
+      "ts": "2020-01-01T00:00:00Z",
+      "source": "supplied",
+      "state": "detached",
+      "horizons": [
+        {
+          "ts": "2020-01-01T00:00:00Z",
+          "source": "supplied",
+          "until": "2099-01-01T00:00:00Z",
+          "by": "a"
+        }
+      ],
+      "resolution": null,
+      "corrections": [],
+      "assessments": [],
+      "node": "n",
+      "qid": "n:s:Y",
+      "provenance": {
+        "as_of": "2030-01-01T00:00:00Z",
+        "ledger_ref": "n:sha256:84912095685baac82eef4bc32fc92782b3918d8c36591a4b0056caafc3f0c7f2",
+        "record_ref": "n:sha256:fec0af8837fd84c158c5420780c35bb31944225cea9eb1ba18d5b1a58c016c96"
+      }
+    }
+  ]
+}
+rc=0

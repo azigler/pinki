@@ -34,11 +34,14 @@ use serde::{Deserialize, Serialize};
 /// than there is.
 pub type Meta = serde_json::Map<String, serde_json::Value>;
 
+/// The longest `within` pinki accepts: 3650 days (about ten years), in seconds.
+pub const WITHIN_MAX_SECS: i64 = 3650 * 86_400;
+
 /// Parse a stored `within` — an ISO-8601 duration — into a fixed length of time.
 ///
 /// Only units with a fixed length are accepted: weeks and days count as 24 hours, and
 /// years and months are refused because a month has no one length. The result is whole
-/// seconds and strictly positive. `verbs` calls this at the edge to say why a value is
+/// seconds, strictly positive and at most [`WITHIN_MAX_SECS`]. `verbs` calls this at the edge to say why a value is
 /// refused; the fold calls it again and reads any `Err` as "no relative horizon", so a
 /// hand-written ledger cannot make the fold fail.
 pub fn within_duration(text: &str) -> Result<SignedDuration, String> {
@@ -62,7 +65,34 @@ pub fn within_duration(text: &str) -> Result<SignedDuration, String> {
     if duration <= SignedDuration::ZERO {
         return Err(format!("`{text}` is not a positive duration"));
     }
+    if duration.as_secs() > WITHIN_MAX_SECS {
+        return Err(format!("`{text}` is longer than 3650 days"));
+    }
     Ok(duration)
+}
+
+/// The one stored form of a `within`: parse to whole seconds, then write `P<n>D` when
+/// the count divides by 86400, else `PT<n>H` by 3600, else `PT<n>M` by 60, else
+/// `PT<n>S`. `P1W`, `PT24H0M0S`, `PT86400S` and `PT007H` all say what `P7D`, `P1D`,
+/// `P1D` and `PT7H` say. Fractions and commas are refused: `PT1.5H` is a decimal
+/// hour, and one spelling of 90 minutes is enough.
+pub fn canonical_within(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.contains(['.', ',']) {
+        return Err(format!(
+            "`{text}` has a fraction or a comma; write whole units (PT90M, not PT1.5H)"
+        ));
+    }
+    let secs = within_duration(text)?.as_secs();
+    Ok(if secs % 86_400 == 0 {
+        format!("P{}D", secs / 86_400)
+    } else if secs % 3_600 == 0 {
+        format!("PT{}H", secs / 3_600)
+    } else if secs % 60 == 0 {
+        format!("PT{}M", secs / 60)
+    } else {
+        format!("PT{secs}S")
+    })
 }
 
 /// A promise: who owes what to whom, by when.
@@ -251,6 +281,13 @@ mod tests {
         assert_eq!(secs("P2D"), 172_800);
         assert_eq!(secs("P1W"), 604_800);
         assert_eq!(secs("P1DT12H"), 129_600);
+        assert_eq!(secs("P3650D"), WITHIN_MAX_SECS);
+    }
+
+    #[test]
+    fn within_duration_refuses_over_3650_days() {
+        assert!(within_duration("P3651D").is_err());
+        assert!(within_duration("PT87601H").is_err());
     }
 
     #[test]
